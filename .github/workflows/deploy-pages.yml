@@ -1,0 +1,59 @@
+name: Deploy Client to GitHub Pages
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - "src/Client/**"
+      - "src/Shared/**"
+      - ".github/workflows/deploy-pages.yml"
+  workflow_dispatch:
+
+env:
+  DOTNET_VERSION: "10.0.x"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Publish
+        run: dotnet publish src/Client/Client.csproj -c Release -p:BaseHref=/${{ github.event.repository.name }}/
+
+      - name: Adjust base href for Pages
+        run: |
+          BASE_HREF="/${{ github.event.repository.name }}/"
+          INDEX_FILE="src/Client/bin/Release/net10.0/publish/wwwroot/index.html"
+          sed -i "s|<base href=\"/\" />|<base href=\"${BASE_HREF}\" />|" "$INDEX_FILE"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: src/Client/bin/Release/net10.0/publish/wwwroot
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

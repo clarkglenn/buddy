@@ -1,0 +1,18 @@
+bin/
+obj/
+.vs/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+**/.DS_Store
+**/.idea/
+**/.playwright-mcp/
+.azure/
+.env
+.env.*
+
+# Local-only ASP.NET Core development settings (may contain secrets)
+**/appsettings.Development.json
+src/Server/appsettings.Development.json
