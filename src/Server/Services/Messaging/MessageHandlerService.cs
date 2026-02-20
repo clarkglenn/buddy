@@ -129,7 +129,7 @@ Status:
                         if (lastThinkingSentAt == null || now - lastThinkingSentAt >= thinkingThrottle)
                         {
                             lastThinkingSentAt = now;
-                            var heartbeatResult = await UpsertResponseAsync(message.From, thinkingMessage, message.Context, replyTs, ct);
+                            var heartbeatResult = await UpsertResponseAsync(message.From, thinkingMessage, message.Context, replyTs, MessageStyle.Thinking, ct);
                             if (heartbeatResult.Success && !string.IsNullOrWhiteSpace(heartbeatResult.MessageTs))
                             {
                                 replyTs = heartbeatResult.MessageTs;
@@ -166,7 +166,7 @@ Status:
                         var current = resultBuffer.ToString();
                         if (!string.Equals(current, lastRenderedMessage, StringComparison.Ordinal))
                         {
-                            var updateResult = await UpsertResponseAsync(message.From, current, message.Context, replyTs, ct);
+                            var updateResult = await UpsertResponseAsync(message.From, current, message.Context, replyTs, MessageStyle.Default, ct);
                             if (updateResult.Success && !string.IsNullOrWhiteSpace(updateResult.MessageTs))
                             {
                                 replyTs = updateResult.MessageTs;
@@ -196,7 +196,7 @@ Status:
                 var finalContent = BuildDefinitiveFinalMessage(resultBuffer.ToString());
                 if (!string.Equals(finalContent, lastRenderedMessage, StringComparison.Ordinal))
                 {
-                    var finalResult = await UpsertResponseAsync(message.From, finalContent, message.Context, replyTs, cancellationToken);
+                    var finalResult = await UpsertResponseAsync(message.From, finalContent, message.Context, replyTs, MessageStyle.Default, cancellationToken);
                     if (finalResult.Success && !string.IsNullOrWhiteSpace(finalResult.MessageTs))
                     {
                         replyTs = finalResult.MessageTs;
@@ -231,14 +231,15 @@ Status:
         }
     }
 
-    private async Task<MessageSendResult> SendMessageAsync(PlatformUser user, string message, CancellationToken cancellationToken, Dictionary<string, string>? context)
+    private async Task<MessageSendResult> SendMessageAsync(PlatformUser user, string message, CancellationToken cancellationToken, Dictionary<string, string>? context, MessageStyle style = MessageStyle.Default)
     {
         var provider = _providerFactory.GetProvider(user.Platform);
         var parameters = new SendMessageParams
         {
             User = user,
             Message = message,
-            Context = context
+            Context = context,
+            Style = style
         };
 
         return await provider.SendMessageAsync(parameters, cancellationToken);
@@ -249,11 +250,12 @@ Status:
         string message,
         Dictionary<string, string>? originalContext,
         string? replyTs,
+        MessageStyle style,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(replyTs))
         {
-            return await SendMessageAsync(user, message, cancellationToken, originalContext);
+            return await SendMessageAsync(user, message, cancellationToken, originalContext, style);
         }
 
         var updateContext = originalContext == null
@@ -262,7 +264,7 @@ Status:
 
         updateContext[UpdateTsContextKey] = replyTs;
 
-        return await SendMessageAsync(user, message, cancellationToken, updateContext);
+        return await SendMessageAsync(user, message, cancellationToken, updateContext, style);
     }
 
     private async Task<string> GetServerAuthStatusAsync(CancellationToken cancellationToken)

@@ -66,6 +66,25 @@ public class SlackProvider : IMessagingProvider
                 ["text"] = parameters.Message
             };
 
+            if (parameters.Style == MessageStyle.Thinking)
+            {
+                payload["blocks"] = new[]
+                {
+                    new Dictionary<string, object>
+                    {
+                        ["type"] = "context",
+                        ["elements"] = new object[]
+                        {
+                            new Dictionary<string, object>
+                            {
+                                ["type"] = "mrkdwn",
+                                ["text"] = $"_{parameters.Message}_"
+                            }
+                        }
+                    }
+                };
+            }
+
             if (isUpdate)
             {
                 payload["ts"] = updateTs!;

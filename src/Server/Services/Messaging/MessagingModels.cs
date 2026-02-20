@@ -12,6 +12,15 @@ public record PlatformUser
 }
 
 /// <summary>
+/// Optional rendering hint for messaging providers
+/// </summary>
+public enum MessageStyle
+{
+    Default,
+    Thinking
+}
+
+/// <summary>
 /// Parameters for sending a message to a platform user
 /// </summary>
 public record SendMessageParams
@@ -22,6 +31,10 @@ public record SendMessageParams
     /// Optional context, e.g., thread ID, reaction type
     /// </summary>
     public Dictionary<string, string>? Context { get; init; }
+    /// <summary>
+    /// Optional style hint for providers
+    /// </summary>
+    public MessageStyle Style { get; init; } = MessageStyle.Default;
 }
 
 /// <summary>
