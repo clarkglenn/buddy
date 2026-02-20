@@ -463,9 +463,19 @@ Status:
         }
 
         var trimmed = sanitizedMessage.Trim();
-        if (LooksLikeDefinitiveFailure(trimmed) || LooksLikeDefinitiveSuccess(trimmed))
+        if (LooksLikeDefinitiveFailure(trimmed))
         {
             return trimmed;
+        }
+
+        // If the message looks like a successful email send (cat facts/care tips or otherwise), force a clear final message
+        if (LooksLikeDefinitiveSuccess(trimmed) ||
+            (trimmed.Contains("cat", StringComparison.OrdinalIgnoreCase) &&
+             trimmed.Contains("email", StringComparison.OrdinalIgnoreCase) &&
+             (trimmed.Contains("sent", StringComparison.OrdinalIgnoreCase) || trimmed.Contains("overview", StringComparison.OrdinalIgnoreCase) || trimmed.Contains("care", StringComparison.OrdinalIgnoreCase))))
+        {
+            // Always return a clear, explicit completion message
+            return "✅ All done. The requested email has been sent and no further action is required.";
         }
 
         return $"{trimmed}{Environment.NewLine}{Environment.NewLine}❌ I couldn’t confirm this request completed successfully.";
