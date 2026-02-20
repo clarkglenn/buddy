@@ -19,4 +19,5 @@ public class SlackOptions
     public string? SigningSecret { get; set; }
     public string? AppLevelToken { get; set; }
     public bool UseSocketMode { get; set; }
+    public string StartupAnnouncementChannel { get; set; } = "all-buddy";
 }

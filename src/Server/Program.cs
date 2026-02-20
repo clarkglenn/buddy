@@ -1,4 +1,3 @@
-using Server.Hubs;
 using Server.Options;
 using Server.Services;
 using Buddy.Server.Services.Messaging;
@@ -12,7 +11,6 @@ if (builder.Environment.IsDevelopment())
 }
 
 builder.Services.AddControllers();
-builder.Services.AddSignalR();
 builder.Services.AddCors(options =>
 {
     var origins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? Array.Empty<string>();
@@ -47,6 +45,8 @@ if (messagingConfig?.Slack?.UseSocketMode == true)
     builder.Services.AddHostedService<SlackSocketModeService>();
 }
 
+builder.Services.AddHostedService<McpAvailabilityAnnouncementService>();
+
 builder.Services.AddSingleton<IGitHubTokenStore, FileBasedGitHubTokenStore>();
 builder.Services.AddSingleton<IMultiChannelTokenStore, FileBasedMultiChannelTokenStore>();
 builder.Services.AddSingleton<ICopilotSessionStore, CopilotSessionStore>();
@@ -71,10 +71,12 @@ builder.Services.AddScoped<CopilotClient>();
 
 var app = builder.Build();
 
+var startupLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("StartupPreflight");
+StartupPreflight.LogCommandAvailability(startupLogger, "pwsh", "powershell", "node", "npx");
+
 app.UseCors();
 
 app.MapControllers();
-app.MapHub<CopilotHub>("/hubs/copilot");
 
 app.Run();
 

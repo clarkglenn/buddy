@@ -57,7 +57,7 @@ public sealed class CopilotClientModelUsageTests
     {
         public McpServerResolution Resolve()
         {
-            return new McpServerResolution(new Dictionary<string, object>(), null);
+            return new McpServerResolution(new Dictionary<string, object>(), null, []);
         }
     }
 }

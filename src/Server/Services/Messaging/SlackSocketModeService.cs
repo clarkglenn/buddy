@@ -1,6 +1,7 @@
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using Buddy.Server.Options;
 
@@ -16,6 +17,11 @@ public class SlackSocketModeService : BackgroundService
     private readonly ILogger<SlackSocketModeService> _logger;
     private readonly HttpClient _httpClient;
     private ClientWebSocket? _webSocket;
+    private string? _pendingReconnectUrl;
+    private bool _reconnectRequested;
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _recentInboundEventKeys = new(StringComparer.Ordinal);
+    private static readonly TimeSpan InboundEventDedupeWindow = TimeSpan.FromMinutes(2);
+    private const string ReplyTsContextKey = "reply_ts";
 
     public SlackSocketModeService(
         IOptions<MessagingOptions> options,
@@ -47,18 +53,28 @@ public class SlackSocketModeService : BackgroundService
         _logger.LogInformation("Starting Slack Socket Mode service...");
 
         var retryCount = 0;
-        const int maxRetries = 10;
         var baseDelay = TimeSpan.FromSeconds(5);
+        var maxDelay = TimeSpan.FromMinutes(2);
+        var random = new Random();
 
-        while (!stoppingToken.IsCancellationRequested && retryCount < maxRetries)
+        while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                // Get WebSocket URL from Slack
-                var wsUrl = await GetWebSocketUrlAsync(slackConfig.AppLevelToken, stoppingToken);
+                // Get WebSocket URL from Slack (prefer reconnect URL from disconnect envelope)
+                var reconnectUrl = _pendingReconnectUrl;
+                _pendingReconnectUrl = null;
+                var wsUrl = !string.IsNullOrWhiteSpace(reconnectUrl)
+                    ? reconnectUrl
+                    : await GetWebSocketUrlAsync(slackConfig.AppLevelToken, stoppingToken);
                 if (string.IsNullOrEmpty(wsUrl))
                 {
                     throw new Exception("Failed to obtain WebSocket URL from Slack");
+                }
+
+                if (!string.IsNullOrWhiteSpace(reconnectUrl))
+                {
+                    _logger.LogInformation("Using reconnect URL provided by Slack");
                 }
 
                 _logger.LogInformation("Connecting to Slack Socket Mode at {Url}", wsUrl);
@@ -67,12 +83,35 @@ public class SlackSocketModeService : BackgroundService
                 _webSocket = new ClientWebSocket();
                 await _webSocket.ConnectAsync(new Uri(wsUrl), stoppingToken);
                 _logger.LogInformation("Successfully connected to Slack Socket Mode");
+                _reconnectRequested = false;
 
                 // Reset retry count on successful connection
                 retryCount = 0;
 
                 // Start receiving messages
                 await ReceiveMessagesAsync(stoppingToken);
+
+                if (_webSocket != null)
+                {
+                    _webSocket.Dispose();
+                    _webSocket = null;
+                }
+
+                if (!stoppingToken.IsCancellationRequested)
+                {
+                    if (_reconnectRequested)
+                    {
+                        _logger.LogInformation("Slack requested reconnect. Reconnecting now...");
+                        await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
+                    }
+                    else
+                    {
+                        retryCount++;
+                        var delay = CalculateReconnectDelay(baseDelay, maxDelay, retryCount, random);
+                        _logger.LogWarning("Slack Socket Mode receive loop ended unexpectedly (attempt {RetryCount}). Retrying in {Delay:F1} seconds...", retryCount, delay.TotalSeconds);
+                        await Task.Delay(delay, stoppingToken);
+                    }
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -82,7 +121,8 @@ public class SlackSocketModeService : BackgroundService
             catch (Exception ex)
             {
                 retryCount++;
-                _logger.LogError(ex, "Error in Slack Socket Mode connection (attempt {RetryCount}/{MaxRetries})", retryCount, maxRetries);
+                var delay = CalculateReconnectDelay(baseDelay, maxDelay, retryCount, random);
+                _logger.LogError(ex, "Error in Slack Socket Mode connection (attempt {RetryCount}). Retrying in {Delay:F1} seconds...", retryCount, delay.TotalSeconds);
 
                 if (_webSocket != null)
                 {
@@ -90,19 +130,18 @@ public class SlackSocketModeService : BackgroundService
                     _webSocket = null;
                 }
 
-                if (retryCount < maxRetries)
-                {
-                    var delay = TimeSpan.FromSeconds(baseDelay.TotalSeconds * Math.Pow(2, Math.Min(retryCount - 1, 5)));
-                    _logger.LogInformation("Retrying connection in {Delay:F1} seconds...", delay.TotalSeconds);
-                    await Task.Delay(delay, stoppingToken);
-                }
+                await Task.Delay(delay, stoppingToken);
             }
         }
+    }
 
-        if (retryCount >= maxRetries)
-        {
-            _logger.LogError("Failed to establish Slack Socket Mode connection after {MaxRetries} attempts", maxRetries);
-        }
+    private static TimeSpan CalculateReconnectDelay(TimeSpan baseDelay, TimeSpan maxDelay, int retryCount, Random random)
+    {
+        var exponent = Math.Min(Math.Max(retryCount - 1, 0), 6);
+        var rawSeconds = baseDelay.TotalSeconds * Math.Pow(2, exponent);
+        var cappedSeconds = Math.Min(rawSeconds, maxDelay.TotalSeconds);
+        var jitterSeconds = random.NextDouble() * 1.5;
+        return TimeSpan.FromSeconds(cappedSeconds + jitterSeconds);
     }
 
     private async Task<string?> GetWebSocketUrlAsync(string appToken, CancellationToken cancellationToken)
@@ -169,6 +208,12 @@ public class SlackSocketModeService : BackgroundService
 
                 var message = messageBuffer.ToString();
                 await ProcessSlackMessageAsync(message, cancellationToken);
+
+                if (_reconnectRequested)
+                {
+                    _logger.LogDebug("Reconnect requested by Slack; ending current receive loop.");
+                    return;
+                }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -208,7 +253,23 @@ public class SlackSocketModeService : BackgroundService
                     break;
 
                 case "disconnect":
-                    _logger.LogWarning("Received disconnect from Slack Socket Mode");
+                    var reason = root.TryGetProperty("reason", out var reasonElement)
+                        ? reasonElement.GetString()
+                        : null;
+                    var reconnectUrl = root.TryGetProperty("reconnect_url", out var reconnectUrlElement)
+                        ? reconnectUrlElement.GetString()
+                        : null;
+
+                    if (!string.IsNullOrWhiteSpace(reconnectUrl))
+                    {
+                        _pendingReconnectUrl = reconnectUrl;
+                    }
+
+                    _reconnectRequested = true;
+                    _logger.LogInformation(
+                        "Received disconnect from Slack Socket Mode. Reason: {Reason}. ReconnectUrlProvided: {HasReconnectUrl}",
+                        string.IsNullOrWhiteSpace(reason) ? "unknown" : reason,
+                        !string.IsNullOrWhiteSpace(reconnectUrl));
                     break;
 
                 case "events_api":
@@ -270,6 +331,16 @@ public class SlackSocketModeService : BackgroundService
             }
 
             var eventType = eventTypeEl.GetString();
+            var eventId = payload.TryGetProperty("event_id", out var eventIdElement)
+                ? eventIdElement.GetString()
+                : null;
+
+            var dedupeKey = BuildEventDedupeKey(eventId, eventType, eventElement);
+            if (!TryRegisterInboundEvent(dedupeKey))
+            {
+                _logger.LogDebug("Skipping duplicate Slack event. EventType={EventType}, DedupeKey={DedupeKey}", eventType, dedupeKey);
+                return;
+            }
 
             // Process based on event type
             IncomingMessage? incomingMessage = null;
@@ -292,6 +363,17 @@ public class SlackSocketModeService : BackgroundService
             // Process the message (fire-and-forget to not block)
             if (incomingMessage != null)
             {
+                var replyTs = await SendImmediateOnItResponseAsync(incomingMessage, cancellationToken);
+                if (!string.IsNullOrWhiteSpace(replyTs))
+                {
+                    var context = incomingMessage.Context == null
+                        ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                        : new Dictionary<string, string>(incomingMessage.Context, StringComparer.OrdinalIgnoreCase);
+
+                    context[ReplyTsContextKey] = replyTs!;
+                    incomingMessage = incomingMessage with { Context = context };
+                }
+
                 await ProcessIncomingMessageAsync(incomingMessage, cancellationToken);
             }
         }
@@ -324,10 +406,18 @@ public class SlackSocketModeService : BackgroundService
             var userId = payload.TryGetProperty("user_id", out var uid) ? uid.GetString() : null;
             var text = payload.TryGetProperty("text", out var cmdText) ? cmdText.GetString() : null;
             var channelId = payload.TryGetProperty("channel_id", out var ch) ? ch.GetString() : null;
+            var triggerId = payload.TryGetProperty("trigger_id", out var trigger) ? trigger.GetString() : null;
 
             if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(text))
             {
                 _logger.LogWarning("Slash command missing required fields");
+                return;
+            }
+
+            var slashDedupeKey = $"slash:{channelId}:{userId}:{triggerId}:{text}";
+            if (!TryRegisterInboundEvent(slashDedupeKey))
+            {
+                _logger.LogDebug("Skipping duplicate slash command. DedupeKey={DedupeKey}", slashDedupeKey);
                 return;
             }
 
@@ -346,6 +436,12 @@ public class SlackSocketModeService : BackgroundService
                     { "is_slash_command", "true" }
                 }
             };
+
+            var replyTs = await SendImmediateOnItResponseAsync(incomingMessage, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(replyTs))
+            {
+                incomingMessage.Context[ReplyTsContextKey] = replyTs!;
+            }
 
             // Process the message without blocking
             await ProcessIncomingMessageAsync(incomingMessage, cancellationToken);
@@ -464,6 +560,95 @@ public class SlackSocketModeService : BackgroundService
                 _logger.LogError(ex, "Error processing message from {User}", message.From);
             }
         }, cancellationToken);
+    }
+
+    private async Task<string?> SendImmediateOnItResponseAsync(IncomingMessage message, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var providerFactory = scope.ServiceProvider.GetRequiredService<IMessagingProviderFactory>();
+            var provider = providerFactory.GetProvider(MessagingPlatform.Slack);
+
+            var sendResult = await provider.SendMessageAsync(new SendMessageParams
+            {
+                User = message.From,
+                Message = "On it",
+                Context = message.Context
+            }, cancellationToken);
+
+            if (sendResult.Success)
+            {
+                return sendResult.MessageTs;
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error sending immediate Slack acknowledgment response");
+            return null;
+        }
+    }
+
+    private bool TryRegisterInboundEvent(string? key)
+    {
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            return true;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        CleanupInboundEventCache(now);
+
+        if (_recentInboundEventKeys.TryGetValue(key, out var seenAt) && now - seenAt < InboundEventDedupeWindow)
+        {
+            return false;
+        }
+
+        _recentInboundEventKeys[key] = now;
+        return true;
+    }
+
+    private void CleanupInboundEventCache(DateTimeOffset now)
+    {
+        if (_recentInboundEventKeys.Count < 512)
+        {
+            return;
+        }
+
+        foreach (var entry in _recentInboundEventKeys)
+        {
+            if (now - entry.Value >= InboundEventDedupeWindow)
+            {
+                _recentInboundEventKeys.TryRemove(entry.Key, out _);
+            }
+        }
+    }
+
+    private static string? BuildEventDedupeKey(string? eventId, string? eventType, JsonElement eventElement)
+    {
+        if (!string.IsNullOrWhiteSpace(eventId))
+        {
+            return $"event:{eventId}";
+        }
+
+        var channel = eventElement.TryGetProperty("channel", out var channelElement)
+            ? channelElement.GetString()
+            : null;
+        var ts = eventElement.TryGetProperty("ts", out var tsElement)
+            ? tsElement.GetString()
+            : null;
+        var user = eventElement.TryGetProperty("user", out var userElement)
+            ? userElement.GetString()
+            : null;
+
+        if (string.IsNullOrWhiteSpace(channel) || string.IsNullOrWhiteSpace(ts))
+        {
+            return null;
+        }
+
+        return $"{eventType}:{channel}:{ts}:{user}";
     }
 
     private async Task AcknowledgeEnvelopeAsync(JsonElement envelope, CancellationToken cancellationToken)

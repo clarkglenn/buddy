@@ -10,5 +10,5 @@ public interface IMessagingProvider
     /// <summary>
     /// Send a message to a platform user
     /// </summary>
-    Task SendMessageAsync(SendMessageParams parameters, CancellationToken cancellationToken = default);
+    Task<MessageSendResult> SendMessageAsync(SendMessageParams parameters, CancellationToken cancellationToken = default);
 }

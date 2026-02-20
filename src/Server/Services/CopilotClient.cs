@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using GitHub.Copilot.SDK;
 using Microsoft.Extensions.Options;
 using Server.Options;
@@ -15,6 +16,23 @@ public sealed class CopilotClient
 
     private const string ChannelContextKey = "channel";
     private const string ThreadContextKey = "thread_ts";
+    private static readonly string[] BuiltInTools =
+    [
+        "run_in_terminal",
+        "run_task",
+        "runTests",
+        "read_file",
+        "grep_search",
+        "file_search",
+        "list_dir",
+        "apply_patch"
+    ];
+
+    private static readonly string[] NonTrivialKeywords =
+    [
+        "code", "implement", "build", "compile", "run", "test", "fix", "bug", "debug", "refactor",
+        "class", "method", "function", "script", "file", "repository", "project", "deploy", "migration"
+    ];
 
     public CopilotClient(
         IOptions<CopilotOptions> options,
@@ -227,6 +245,16 @@ public sealed class CopilotClient
                         request.Done.TrySetException(new InvalidOperationException($"Copilot session error: {error.Data.Message}"));
                         break;
                     }
+
+                default:
+                    {
+                        if (IsLikelyToolEvent(evt))
+                        {
+                            request.ToolUsed = true;
+                        }
+
+                        break;
+                    }
             }
         });
 
@@ -240,7 +268,7 @@ public sealed class CopilotClient
         CancellationToken cancellationToken)
     {
         var buffer = new System.Text.StringBuilder();
-        var requestState = new CopilotRequestState(buffer, onDelta);
+        var requestState = new CopilotRequestState(buffer, onDelta, IsTrivialPrompt(prompt));
         entry.CurrentRequest = requestState;
 
         try
@@ -259,6 +287,11 @@ public sealed class CopilotClient
             }
 
             await requestState.Done.Task;
+
+            var response = buffer.ToString();
+            EnforceToolUsePolicy(prompt, requestState.IsTrivialPrompt, requestState.ToolUsed, response);
+
+            return response;
         }
         catch (Exception ex)
         {
@@ -270,8 +303,6 @@ public sealed class CopilotClient
             entry.CurrentRequest = null;
             entry.Touch();
         }
-
-        return buffer.ToString();
     }
 
     private void ApplyMcpServers(SessionConfig sessionConfig)
@@ -288,19 +319,99 @@ public sealed class CopilotClient
             return;
         }
 
-        var applied = TrySetSessionConfigProperty(sessionConfig, "McpServers", resolution.Servers);
-        if (!applied && !string.IsNullOrWhiteSpace(resolution.ConfigDir))
-        {
-            applied = TrySetSessionConfigProperty(sessionConfig, "ConfigDir", resolution.ConfigDir);
-        }
+        var serverNames = resolution.Servers.Keys
+            .OrderBy(static name => name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        _logger.LogInformation(
+            "Attempting MCP setup for Copilot session. Servers={Servers}. ConfigDir={ConfigDir}",
+            string.Join(", ", serverNames),
+            string.IsNullOrWhiteSpace(resolution.ConfigDir) ? "<none>" : resolution.ConfigDir);
 
-        if (applied)
+        var appliedVia = string.Empty;
+        string? firstError = null;
+
+        if (TrySetSessionConfigPropertyWithDiagnostics(sessionConfig, "McpServers", resolution.Servers, out var mcpServersError))
         {
-            _logger.LogInformation("Loaded {Count} MCP server(s) for Copilot CLI.", resolution.Servers.Count);
+            appliedVia = "McpServers";
         }
         else
         {
-            _logger.LogWarning("MCP servers resolved but Copilot SDK does not expose McpServers or ConfigDir.");
+            firstError = mcpServersError;
+            _logger.LogWarning(
+                "Failed to bind MCP servers via SessionConfig.McpServers. Error={Error}",
+                string.IsNullOrWhiteSpace(mcpServersError) ? "n/a" : mcpServersError);
+        }
+
+        if (string.IsNullOrEmpty(appliedVia) && !string.IsNullOrWhiteSpace(resolution.ConfigDir))
+        {
+            if (TrySetSessionConfigPropertyWithDiagnostics(sessionConfig, "ConfigDir", resolution.ConfigDir, out var configDirError))
+            {
+                appliedVia = "ConfigDir";
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Failed to bind MCP config via SessionConfig.ConfigDir. Error={Error}",
+                    string.IsNullOrWhiteSpace(configDirError) ? "n/a" : configDirError);
+
+                if (string.IsNullOrWhiteSpace(firstError))
+                {
+                    firstError = configDirError;
+                }
+            }
+        }
+
+        if (!string.IsNullOrEmpty(appliedVia))
+        {
+            _logger.LogInformation(
+                "Loaded {Count} MCP server(s) for Copilot CLI via SessionConfig.{AppliedVia}.",
+                resolution.Servers.Count,
+                appliedVia);
+        }
+        else
+        {
+            var detail = $"Resolved MCP servers ({string.Join(", ", serverNames)}) but failed to bind to Copilot SDK session config.";
+            if (!string.IsNullOrWhiteSpace(firstError))
+            {
+                detail = $"{detail} Cause: {firstError}";
+            }
+
+            throw new McpSetupException(
+                "MCP tools are temporarily unavailable for this Copilot session.",
+                serverNames,
+                detail);
+        }
+    }
+
+    private static bool TrySetSessionConfigPropertyWithDiagnostics(
+        SessionConfig sessionConfig,
+        string propertyName,
+        object? value,
+        out string? error)
+    {
+        error = null;
+        var property = sessionConfig.GetType().GetProperty(propertyName);
+        if (property == null)
+        {
+            error = $"Property '{propertyName}' not found on SessionConfig.";
+            return false;
+        }
+
+        if (!property.CanWrite)
+        {
+            error = $"Property '{propertyName}' exists but is not writable.";
+            return false;
+        }
+
+        try
+        {
+            property.SetValue(sessionConfig, value);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            return false;
         }
     }
 
@@ -320,7 +431,10 @@ public sealed class CopilotClient
     {
         if (!_options.ToolAccess.AdvertiseAllTools && string.IsNullOrWhiteSpace(_options.SystemMessage))
         {
-            return null;
+            if (!_options.ToolUsePolicy.Enabled)
+            {
+                return null;
+            }
         }
 
         var parts = new List<string>();
@@ -335,9 +449,174 @@ public sealed class CopilotClient
             var message = string.IsNullOrWhiteSpace(_options.ToolAccess.AdvertiseMessage)
                 ? "You have access to MCP tools configured for this session. Only use tools that are actually available/allowed, and ensure any required executables (for example: pwsh, node, npx) are installed and on PATH."
                 : _options.ToolAccess.AdvertiseMessage.Trim();
+
+            var explicitTools = BuildExplicitToolsList();
+            if (!string.IsNullOrWhiteSpace(explicitTools))
+            {
+                message = $"{message} Explicit tools list: {explicitTools}.";
+            }
+
             parts.Add(message);
         }
 
+        if (_options.ToolUsePolicy.Enabled)
+        {
+            var categories = _options.ToolUsePolicy.PreferredToolCategories is { Length: > 0 }
+                ? string.Join(", ", _options.ToolUsePolicy.PreferredToolCategories)
+                : "MCP, CLI, read-only helper tools";
+
+            parts.Add($"Policy: For non-trivial requests, use tools instead of direct answers. Preferred categories: {categories}. Direct no-tool responses are only allowed for concise factual questions.");
+        }
+
         return parts.Count == 0 ? null : string.Join(Environment.NewLine + Environment.NewLine, parts);
+    }
+
+    private string BuildExplicitToolsList()
+    {
+        var tools = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var tool in GetBuiltInToolNames())
+        {
+            tools.Add(tool);
+        }
+
+        foreach (var tool in GetMcpToolNames())
+        {
+            tools.Add(tool);
+        }
+
+        return tools.Count == 0
+            ? string.Empty
+            : string.Join(", ", tools.OrderBy(static tool => tool, StringComparer.OrdinalIgnoreCase));
+    }
+
+    private IEnumerable<string> GetBuiltInToolNames()
+    {
+        IEnumerable<string> tools = !_options.ToolAccess.AllowAll && _options.ToolAccess.AvailableTools is { Length: > 0 }
+            ? _options.ToolAccess.AvailableTools
+            : BuiltInTools;
+
+        if (_options.ToolAccess.ExcludedTools is { Length: > 0 })
+        {
+            var excluded = new HashSet<string>(_options.ToolAccess.ExcludedTools, StringComparer.OrdinalIgnoreCase);
+            tools = tools.Where(tool => !excluded.Contains(tool));
+        }
+
+        return tools
+            .Where(tool => !string.IsNullOrWhiteSpace(tool))
+            .Select(tool => tool.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private IReadOnlyList<string> GetMcpToolNames()
+    {
+        if (!_options.McpDiscovery.Enabled)
+        {
+            return [];
+        }
+
+        try
+        {
+            var resolution = _mcpServerResolver.Resolve();
+            return resolution.ToolNames;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to resolve MCP tools for explicit prompt list.");
+            return [];
+        }
+    }
+
+    private void EnforceToolUsePolicy(string prompt, bool isTrivialPrompt, bool toolUsed, string response)
+    {
+        if (!_options.ToolUsePolicy.Enabled)
+        {
+            return;
+        }
+
+        if (toolUsed)
+        {
+            return;
+        }
+
+        if (isTrivialPrompt && _options.ToolUsePolicy.AllowDirectResponsesForTrivialQuestions)
+        {
+            return;
+        }
+
+        if (!_options.ToolUsePolicy.FailImmediatelyOnViolation)
+        {
+            return;
+        }
+
+        _logger.LogWarning(
+            "Copilot tool-use policy violation detected. PromptLength={PromptLength}, ResponseLength={ResponseLength}, TrivialPrompt={TrivialPrompt}",
+            prompt.Length,
+            response.Length,
+            isTrivialPrompt);
+
+        throw new InvalidOperationException(_options.ToolUsePolicy.ViolationMessage);
+    }
+
+    private bool IsTrivialPrompt(string prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt))
+        {
+            return true;
+        }
+
+        var normalized = prompt.Trim();
+        if (normalized.Length > _options.ToolUsePolicy.TrivialQuestionMaxChars)
+        {
+            return false;
+        }
+
+        if (normalized.Contains('\n'))
+        {
+            return false;
+        }
+
+        var lowered = normalized.ToLowerInvariant();
+        if (NonTrivialKeywords.Any(keyword => lowered.Contains(keyword, StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        var wordCount = Regex.Matches(normalized, @"\b\w+\b").Count;
+        if (wordCount > 30)
+        {
+            return false;
+        }
+
+        return normalized.EndsWith("?", StringComparison.Ordinal)
+            || lowered.StartsWith("what is ", StringComparison.Ordinal)
+            || lowered.StartsWith("who is ", StringComparison.Ordinal)
+            || lowered.StartsWith("when is ", StringComparison.Ordinal)
+            || lowered.StartsWith("where is ", StringComparison.Ordinal)
+            || lowered.StartsWith("how many ", StringComparison.Ordinal)
+            || lowered.StartsWith("define ", StringComparison.Ordinal)
+            || lowered.StartsWith("briefly explain ", StringComparison.Ordinal);
+    }
+
+    private static bool IsLikelyToolEvent(object evt)
+    {
+        var eventTypeName = evt.GetType().Name;
+        return eventTypeName.Contains("Tool", StringComparison.OrdinalIgnoreCase)
+            || eventTypeName.Contains("Function", StringComparison.OrdinalIgnoreCase)
+            || eventTypeName.Contains("Mcp", StringComparison.OrdinalIgnoreCase)
+            || eventTypeName.Contains("Command", StringComparison.OrdinalIgnoreCase);
+    }
+}
+
+public sealed class McpSetupException : Exception
+{
+    public IReadOnlyList<string> ServerNames { get; }
+    public string Detail { get; }
+
+    public McpSetupException(string message, IReadOnlyList<string> serverNames, string detail)
+        : base(message)
+    {
+        ServerNames = serverNames;
+        Detail = detail;
     }
 }

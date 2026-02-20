@@ -29,6 +29,8 @@ public sealed class CopilotOptions
     public ToolAccessOptions ToolAccess { get; init; } = new();
 
     public McpDiscoveryOptions McpDiscovery { get; init; } = new();
+
+    public ToolUsePolicyOptions ToolUsePolicy { get; init; } = new();
 }
 
 public sealed class ToolAccessOptions
@@ -90,4 +92,37 @@ public sealed class McpDiscoveryOptions
     /// Optional override for the user MCP config path.
     /// </summary>
     public string? UserConfigPath { get; init; }
+}
+
+public sealed class ToolUsePolicyOptions
+{
+    /// <summary>
+    /// Enables policy checks that require tool usage for non-trivial prompts.
+    /// </summary>
+    public bool Enabled { get; init; } = true;
+
+    /// <summary>
+    /// When true, short/simple questions may be answered directly without tools.
+    /// </summary>
+    public bool AllowDirectResponsesForTrivialQuestions { get; init; } = true;
+
+    /// <summary>
+    /// Maximum prompt length (characters) considered for trivial-question classification.
+    /// </summary>
+    public int TrivialQuestionMaxChars { get; init; } = 220;
+
+    /// <summary>
+    /// When true, requests that violate policy fail immediately without retries.
+    /// </summary>
+    public bool FailImmediatelyOnViolation { get; init; } = true;
+
+    /// <summary>
+    /// User-facing message returned when a non-trivial response does not use tools.
+    /// </summary>
+    public string ViolationMessage { get; init; } = "Policy requires using MCP/CLI tools for non-trivial requests. Ask a concise factual question for direct Q&A, or rephrase the request to run through tools.";
+
+    /// <summary>
+    /// Advisory categories for prompt guidance.
+    /// </summary>
+    public string[] PreferredToolCategories { get; init; } = ["MCP", "CLI", "ReadOnlyHelpers"];
 }

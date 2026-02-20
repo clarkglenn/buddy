@@ -15,6 +15,7 @@ public class SlackProvider : IMessagingProvider
 
     private const string ChannelContextKey = "channel";
     private const string ThreadContextKey = "thread_ts";
+    private const string UpdateTsContextKey = "update_ts";
 
     private readonly HttpClient _httpClient;
     private readonly IOptions<MessagingOptions> _options;
@@ -27,13 +28,13 @@ public class SlackProvider : IMessagingProvider
         _logger = logger;
     }
 
-    public async Task SendMessageAsync(SendMessageParams parameters, CancellationToken cancellationToken = default)
+    public async Task<MessageSendResult> SendMessageAsync(SendMessageParams parameters, CancellationToken cancellationToken = default)
     {
         var slackConfig = _options.Value.Slack;
         if (string.IsNullOrEmpty(slackConfig?.BotToken))
         {
             _logger.LogWarning("Slack configuration is missing. Cannot send message.");
-            return;
+            return new MessageSendResult { Success = false, Error = "missing_bot_token" };
         }
 
         try
@@ -48,12 +49,16 @@ public class SlackProvider : IMessagingProvider
             if (string.IsNullOrWhiteSpace(channelId))
             {
                 _logger.LogError("Slack channel ID could not be resolved for user {UserId}. Unable to send message.", parameters.User.PlatformUserId);
-                return;
+                return new MessageSendResult { Success = false, Error = "missing_channel" };
             }
 
-            _logger.LogDebug("Sending Slack message to channel {ChannelId}", channelId);
+            var updateTs = ResolveUpdateTs(parameters);
+            var isUpdate = !string.IsNullOrWhiteSpace(updateTs);
+            _logger.LogDebug("Sending Slack {Mode} to channel {ChannelId}", isUpdate ? "update" : "message", channelId);
 
-            var url = "https://slack.com/api/chat.postMessage";
+            var url = isUpdate
+                ? "https://slack.com/api/chat.update"
+                : "https://slack.com/api/chat.postMessage";
 
             var payload = new Dictionary<string, object>
             {
@@ -61,10 +66,17 @@ public class SlackProvider : IMessagingProvider
                 ["text"] = parameters.Message
             };
 
-            var threadTs = ResolveThreadTs(parameters);
-            if (!string.IsNullOrWhiteSpace(threadTs))
+            if (isUpdate)
             {
-                payload["thread_ts"] = threadTs;
+                payload["ts"] = updateTs!;
+            }
+            else
+            {
+                var threadTs = ResolveThreadTs(parameters);
+                if (!string.IsNullOrWhiteSpace(threadTs))
+                {
+                    payload["thread_ts"] = threadTs;
+                }
             }
 
             var content = new StringContent(
@@ -86,7 +98,12 @@ public class SlackProvider : IMessagingProvider
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogError("Failed to send Slack message: HTTP {StatusCode} - {Error}", response.StatusCode, responseBody);
-                return;
+                return new MessageSendResult
+                {
+                    Success = false,
+                    ChannelId = channelId,
+                    Error = $"http_{(int)response.StatusCode}"
+                };
             }
 
             // Check Slack API response
@@ -94,15 +111,32 @@ public class SlackProvider : IMessagingProvider
             if (doc.RootElement.TryGetProperty("ok", out var ok) && ok.GetBoolean())
             {
                 _logger.LogDebug("Successfully sent Slack message to channel {ChannelId}", channelId);
-                return;
+                var messageTs = TryGetMessageTimestamp(doc.RootElement);
+                return new MessageSendResult
+                {
+                    Success = true,
+                    ChannelId = channelId,
+                    MessageTs = messageTs
+                };
             }
 
             var errorMsg = doc.RootElement.TryGetProperty("error", out var errorEl) ? errorEl.GetString() : "unknown_error";
             _logger.LogError("Slack API error: {Error}", errorMsg);
+            return new MessageSendResult
+            {
+                Success = false,
+                ChannelId = channelId,
+                Error = errorMsg
+            };
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error sending Slack message to {UserId}", parameters.User.PlatformUserId);
+            return new MessageSendResult
+            {
+                Success = false,
+                Error = ex.Message
+            };
         }
     }
 
@@ -128,6 +162,36 @@ public class SlackProvider : IMessagingProvider
         return parameters.Context.TryGetValue(ThreadContextKey, out var threadTs) && !string.IsNullOrWhiteSpace(threadTs)
             ? threadTs
             : null;
+    }
+
+    private static string? ResolveUpdateTs(SendMessageParams parameters)
+    {
+        if (parameters.Context == null)
+        {
+            return null;
+        }
+
+        return parameters.Context.TryGetValue(UpdateTsContextKey, out var ts) && !string.IsNullOrWhiteSpace(ts)
+            ? ts
+            : null;
+    }
+
+    private static string? TryGetMessageTimestamp(JsonElement root)
+    {
+        if (root.TryGetProperty("ts", out var tsElement) && tsElement.ValueKind == JsonValueKind.String)
+        {
+            return tsElement.GetString();
+        }
+
+        if (root.TryGetProperty("message", out var messageElement) &&
+            messageElement.ValueKind == JsonValueKind.Object &&
+            messageElement.TryGetProperty("ts", out var nestedTs) &&
+            nestedTs.ValueKind == JsonValueKind.String)
+        {
+            return nestedTs.GetString();
+        }
+
+        return null;
     }
 
     private async Task<string?> OpenDirectMessageChannelAsync(string botToken, string userId, CancellationToken cancellationToken)

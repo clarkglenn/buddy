@@ -178,11 +178,14 @@ public sealed class CopilotRequestState
     public StringBuilder Buffer { get; }
     public Func<string, CancellationToken, Task> OnDelta { get; }
     public TaskCompletionSource<bool> Done { get; }
+    public bool IsTrivialPrompt { get; }
+    public bool ToolUsed { get; set; }
 
-    public CopilotRequestState(StringBuilder buffer, Func<string, CancellationToken, Task> onDelta)
+    public CopilotRequestState(StringBuilder buffer, Func<string, CancellationToken, Task> onDelta, bool isTrivialPrompt)
     {
         Buffer = buffer;
         OnDelta = onDelta;
+        IsTrivialPrompt = isTrivialPrompt;
         Done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 }

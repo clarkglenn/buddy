@@ -25,6 +25,17 @@ public record SendMessageParams
 }
 
 /// <summary>
+/// Result metadata for message send/update operations
+/// </summary>
+public record MessageSendResult
+{
+    public bool Success { get; init; }
+    public string? ChannelId { get; init; }
+    public string? MessageTs { get; init; }
+    public string? Error { get; init; }
+}
+
+/// <summary>
 /// Represents an incoming message from a platform
 /// </summary>
 public record IncomingMessage
