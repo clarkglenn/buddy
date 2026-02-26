@@ -1,85 +1,34 @@
 @page "/"
 @implements IAsyncDisposable
-@using System.Net.Http.Json
-@using System.Text.Json
-@inject HttpClient Http
 @inject Client.Services.CopilotHubClient HubClient
-@inject Client.Services.GitHubAuthUiState AuthState
 
 <PageTitle>Buddy Copilot</PageTitle>
 
-@if (!AuthState.IsAuthenticated)
-{
-	<div class="grid">
-		<section class="panel">
-			<h2>🤖 Welcome to Buddy Copilot</h2>
-			<p>Interact with GitHub Copilot via WhatsApp, Slack, or Microsoft Teams.</p>
-			<p class="status">@AuthState.StatusText</p>
-			<p>Ask an admin to authenticate the server at <a href="api/auth/admin/login">api/auth/admin/login</a>.</p>
-		</section>
-	</div>
-}
-else
-{
-	<div class="grid">
-		<section class="panel">
-			<h2>✅ Server Authenticated</h2>
-			<p>The server is authenticated with GitHub. Start messaging the Buddy bot on your platform.</p>
-			
-			<div class="instructions">
-				<h3>📱 How to Use</h3>
-				<ol>
-					<li>Open a chat with the Buddy bot on your platform</li>
-					<li>Send any prompt</li>
-				</ol>
-				<p class="hint">Available commands on messaging platforms:</p>
-				<ul>
-					<li><code>/help</code> - Show available commands</li>
-					<li>Send any message - It will be sent to GitHub Copilot</li>
-				</ul>
-			</div>
-		</section>
-	</div>
-}
+
+<div class="grid">
+	<section class="panel">
+		<h2>🤖 Buddy Copilot</h2>
+		<p>Buddy now uses machine-level Copilot CLI auth and no longer requires GitHub OAuth in this app.</p>
+
+		<div class="instructions">
+			<h3>📱 How to Use</h3>
+			<ol>
+				<li>Open a chat with the Buddy bot on your platform</li>
+				<li>Send any prompt</li>
+			</ol>
+			<p class="hint">Available commands on messaging platforms:</p>
+			<ul>
+				<li><code>/help</code> - Show available commands</li>
+				<li>Send any message - It will be sent to Copilot CLI</li>
+			</ul>
+		</div>
+	</section>
+</div>
 
 @code {
 	protected override async Task OnInitializedAsync()
 	{
 		await HubClient.ConnectAsync();
-		AuthState.StatusText = "Checking server authentication...";
-		AuthState.NotifyChanged();
-
-		await LoadAuthStatusAsync();
-	}
-
-	private async Task LoadAuthStatusAsync()
-	{
-		try
-		{
-			var status = await Http.GetFromJsonAsync<AuthStatus>("api/auth/status");
-			if (status?.Connected == true)
-			{
-				AuthState.IsAuthenticated = true;
-				AuthState.StatusText = "✅ Server authenticated.";
-			}
-			else
-			{
-				AuthState.IsAuthenticated = false;
-				AuthState.StatusText = "⚠️ Server not authenticated.";
-			}
-		}
-		catch
-		{
-			AuthState.IsAuthenticated = false;
-			AuthState.StatusText = "⚠️ Unable to verify server authentication.";
-		}
-
-		AuthState.NotifyChanged();
-	}
-
-	private sealed class AuthStatus
-	{
-		public bool Connected { get; set; }
 	}
 
 	public async ValueTask DisposeAsync()

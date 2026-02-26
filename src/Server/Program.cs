@@ -24,13 +24,6 @@ builder.Services.AddCors(options =>
     });
 });
 
-builder.Services.AddOptions<GitHubOptions>()
-    .BindConfiguration(GitHubOptions.SectionName)
-    .Validate(o => !string.IsNullOrWhiteSpace(o.ClientId), "GitHub:ClientId is required.")
-    .Validate(o => !string.IsNullOrWhiteSpace(o.ClientSecret), "GitHub:ClientSecret is required.")
-    .Validate(o => !string.IsNullOrWhiteSpace(o.RedirectUri), "GitHub:RedirectUri is required.")
-    .ValidateOnStart();
-
 builder.Services.AddOptions<CopilotOptions>()
     .BindConfiguration(CopilotOptions.SectionName)
     .Validate(options => !string.IsNullOrWhiteSpace(options.Cli.Command), "Copilot:Cli:Command is required.")
@@ -55,8 +48,6 @@ if (messagingConfig?.Slack?.UseSocketMode == true)
 
 builder.Services.AddHostedService<McpAvailabilityAnnouncementService>();
 
-builder.Services.AddSingleton<IGitHubTokenStore, FileBasedGitHubTokenStore>();
-builder.Services.AddSingleton<IMultiChannelTokenStore, FileBasedMultiChannelTokenStore>();
 builder.Services.AddSingleton<ICopilotSessionStore, CopilotSessionStore>();
 builder.Services.AddSingleton<IMcpServerResolver, McpServerResolver>();
 builder.Services.AddScoped<IMessageHandlerService, MessageHandlerService>();
@@ -74,7 +65,6 @@ builder.Services.AddSingleton<IMessagingProviderFactory>(sp =>
     return new MessagingProviderFactory(providers);
 });
 
-builder.Services.AddHttpClient<GitHubAuthService>();
 builder.Services.AddScoped<CopilotClient>();
 
 var app = builder.Build();

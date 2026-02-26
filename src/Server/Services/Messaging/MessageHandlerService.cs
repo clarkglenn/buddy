@@ -1,5 +1,4 @@
 using CopilotClient = global::Server.Services.CopilotClient;
-using IGitHubTokenStore = global::Server.Services.IGitHubTokenStore;
 using IMcpServerResolver = global::Server.Services.IMcpServerResolver;
 using McpSetupException = global::Server.Services.McpSetupException;
 using System.Text;
@@ -14,23 +13,17 @@ public class MessageHandlerService : IMessageHandlerService
     private const string ReplyTsContextKey = "reply_ts";
     private const string UpdateTsContextKey = "update_ts";
 
-    private readonly IGitHubTokenStore _serverTokenStore;
-    private readonly IMultiChannelTokenStore _tokenStore;
     private readonly IMessagingProviderFactory _providerFactory;
     private readonly CopilotClient _copilotClient;
     private readonly IMcpServerResolver _mcpServerResolver;
     private readonly ILogger<MessageHandlerService> _logger;
 
     public MessageHandlerService(
-        IGitHubTokenStore serverTokenStore,
-        IMultiChannelTokenStore tokenStore,
         IMessagingProviderFactory providerFactory,
         CopilotClient copilotClient,
         IMcpServerResolver mcpServerResolver,
         ILogger<MessageHandlerService> logger)
     {
-        _serverTokenStore = serverTokenStore;
-        _tokenStore = tokenStore;
         _providerFactory = providerFactory;
         _copilotClient = copilotClient;
         _mcpServerResolver = mcpServerResolver;
@@ -54,7 +47,6 @@ public class MessageHandlerService : IMessageHandlerService
 
     private async Task HandleHelpCommandAsync(IncomingMessage message, CancellationToken cancellationToken)
     {
-        var status = await GetServerAuthStatusAsync(cancellationToken);
         var helpText = $@"🤖 **Buddy Copilot Help**
 
 Commands:
@@ -63,22 +55,14 @@ Commands:
 Simply send any message to interact with Copilot!
 
 Status:
-{status}";
+✅ Copilot CLI machine auth is in use.";
 
         await SendMessageAsync(message.From, helpText, cancellationToken, message.Context);
     }
 
     private async Task HandlePromptAsync(IncomingMessage message, CancellationToken cancellationToken)
     {
-        var token = await _serverTokenStore.GetTokenAsync(cancellationToken);
-        token ??= await _tokenStore.GetTokenAsync(message.From, cancellationToken);
-
-        if (token == null)
-        {
-            var status = await GetServerAuthStatusAsync(cancellationToken);
-            await SendMessageAsync(message.From, status, cancellationToken, message.Context);
-            return;
-        }
+        const string token = "";
 
         if (LooksLikeEmailRequest(message.Text))
         {
@@ -269,17 +253,6 @@ Status:
         updateContext[UpdateTsContextKey] = replyTs;
 
         return await SendMessageAsync(user, message, cancellationToken, updateContext, style);
-    }
-
-    private async Task<string> GetServerAuthStatusAsync(CancellationToken cancellationToken)
-    {
-        var token = await _serverTokenStore.GetTokenAsync(cancellationToken);
-        if (string.IsNullOrWhiteSpace(token))
-        {
-            return "⚠️ Copilot SDK is not authenticated. Ask an admin to authenticate the server at /api/auth/admin/login.";
-        }
-
-        return "✅ Copilot SDK is authenticated and ready to use.";
     }
 
     private static IEnumerable<string> ChunkMessage(string message, int chunkSize)
