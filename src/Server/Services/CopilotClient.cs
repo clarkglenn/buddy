@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using Buddy.Server.Services.Messaging;
@@ -52,6 +53,11 @@ public sealed class CopilotClient
         if (string.IsNullOrWhiteSpace(conversationKey))
         {
             var ephemeralEntry = new CopilotSessionEntry();
+            _logger.LogInformation(
+                "Copilot request started. SessionId={SessionId}, Mode=ephemeral, ReusePerSession={ReusePerSession}",
+                ephemeralEntry.CliSessionId,
+                _options.Cli.ReuseProcessPerSession);
+
             return await StreamWithSessionAsync(ephemeralEntry, prompt, onDelta, cancellationToken, persistConversation: false);
         }
 
@@ -60,17 +66,55 @@ public sealed class CopilotClient
             static _ => Task.FromResult(new CopilotSessionEntry()),
             cancellationToken);
 
+        _logger.LogInformation(
+            "Copilot request queued. SessionId={SessionId}, ConversationKey={ConversationKey}, ReusePerSession={ReusePerSession}",
+            entry.CliSessionId,
+            conversationKey,
+            _options.Cli.ReuseProcessPerSession);
+
+        var gateWaitSw = Stopwatch.StartNew();
         await entry.Gate.WaitAsync(cancellationToken);
+        gateWaitSw.Stop();
+
+        _logger.LogInformation(
+            "Copilot request acquired session gate. SessionId={SessionId}, WaitMs={WaitMs}",
+            entry.CliSessionId,
+            gateWaitSw.ElapsedMilliseconds);
+
+        var requestSw = Stopwatch.StartNew();
         try
         {
             var response = await StreamWithSessionAsync(entry, prompt, onDelta, cancellationToken, persistConversation: true);
 
+            requestSw.Stop();
+            _logger.LogInformation(
+                "Copilot request completed. SessionId={SessionId}, DurationMs={DurationMs}, ResponseChars={ResponseChars}",
+                entry.CliSessionId,
+                requestSw.ElapsedMilliseconds,
+                response.Length);
+
             if (entry.IsFaulted)
             {
+                _logger.LogWarning(
+                    "Copilot session fault detected; removing session. SessionId={SessionId}, ConversationKey={ConversationKey}",
+                    entry.CliSessionId,
+                    conversationKey);
+
                 await _sessionStore.RemoveAsync(conversationKey, cancellationToken);
             }
 
             return response;
+        }
+        catch (Exception ex)
+        {
+            requestSw.Stop();
+            _logger.LogError(
+                ex,
+                "Copilot request failed. SessionId={SessionId}, DurationMs={DurationMs}, ConversationKey={ConversationKey}",
+                entry.CliSessionId,
+                requestSw.ElapsedMilliseconds,
+                conversationKey);
+            throw;
         }
         finally
         {
@@ -80,7 +124,16 @@ public sealed class CopilotClient
 
     private string BuildPrompt(string prompt)
     {
-        return prompt;
+        return $"""
+Formatting requirements for your final answer:
+- Use plain text.
+- Use line breaks between sections.
+- When summarizing items (emails, messages, files, results), use a bullet list with one item per line.
+- Do not include tool traces, internal logs, or execution metadata.
+
+User request:
+{prompt}
+""";
     }
 
     private string BuildPromptWithHistory(CopilotSessionEntry entry, string prompt)
@@ -148,7 +201,7 @@ public sealed class CopilotClient
         try
         {
             var enrichedPrompt = BuildPromptWithHistory(entry, prompt);
-            await ExecuteCliRequestAsync(enrichedPrompt, requestState, cancellationToken);
+            await ExecuteCliRequestAsync(enrichedPrompt, requestState, cancellationToken, persistConversation ? entry : null);
 
             var response = buffer.ToString();
 
@@ -172,7 +225,45 @@ public sealed class CopilotClient
         }
     }
 
-    private async Task ExecuteCliRequestAsync(string prompt, CopilotRequestState requestState, CancellationToken cancellationToken)
+    private async Task ExecuteCliRequestAsync(
+        string prompt,
+        CopilotRequestState requestState,
+        CancellationToken cancellationToken,
+        CopilotSessionEntry? entry)
+    {
+        if (_options.Cli.ReuseProcessPerSession && entry != null)
+        {
+            await ExecuteCliRequestWithResumedSessionAsync(entry, prompt, requestState, cancellationToken);
+            return;
+        }
+
+        await ExecuteCliRequestOneShotAsync(prompt, requestState, cancellationToken, static _ => { });
+    }
+
+    private async Task ExecuteCliRequestWithResumedSessionAsync(
+        CopilotSessionEntry entry,
+        string prompt,
+        CopilotRequestState requestState,
+        CancellationToken cancellationToken)
+    {
+        await ExecuteCliRequestOneShotAsync(
+            prompt,
+            requestState,
+            cancellationToken,
+            startInfo =>
+            {
+                startInfo.ArgumentList.Add("--resume");
+                startInfo.ArgumentList.Add(entry.CliSessionId);
+                startInfo.ArgumentList.Add("--no-color");
+                startInfo.ArgumentList.Add("--no-alt-screen");
+            });
+    }
+
+    private async Task ExecuteCliRequestOneShotAsync(
+        string prompt,
+        CopilotRequestState requestState,
+        CancellationToken cancellationToken,
+        Action<ProcessStartInfo> configureStartInfo)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -196,10 +287,26 @@ public sealed class CopilotClient
         }
 
         startInfo.ArgumentList.Add("--allow-all-tools");
+        startInfo.ArgumentList.Add("--silent");
+        startInfo.ArgumentList.Add("--prompt");
+        startInfo.ArgumentList.Add(prompt);
+        configureStartInfo(startInfo);
+
+        var requestId = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture)[..8];
+        var mode = TryGetResumeSessionId(startInfo, out var resumeSessionId) ? "resume" : "oneshot";
 
         ApplyCliEnvironment(startInfo);
 
         using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+        var execSw = Stopwatch.StartNew();
+
+        _logger.LogInformation(
+            "Copilot CLI process starting. RequestId={RequestId}, Mode={Mode}, ResumeSessionId={ResumeSessionId}, TimeoutSeconds={TimeoutSeconds}, ArgCount={ArgCount}",
+            requestId,
+            mode,
+            resumeSessionId ?? "-",
+            _options.Cli.ResponseTimeoutSeconds,
+            startInfo.ArgumentList.Count);
 
         try
         {
@@ -207,9 +314,23 @@ public sealed class CopilotClient
             {
                 throw new InvalidOperationException("Failed to start Copilot CLI process.");
             }
+
+            _logger.LogInformation(
+                "Copilot CLI process started. RequestId={RequestId}, Pid={Pid}",
+                requestId,
+                process.Id);
         }
         catch (Exception ex)
         {
+            execSw.Stop();
+            _logger.LogError(
+                ex,
+                "Copilot CLI process failed to start. RequestId={RequestId}, Mode={Mode}, ResumeSessionId={ResumeSessionId}, ElapsedMs={ElapsedMs}",
+                requestId,
+                mode,
+                resumeSessionId ?? "-",
+                execSw.ElapsedMilliseconds);
+
             throw new InvalidOperationException($"Failed to launch Copilot CLI command '{_options.Cli.Command}'. Ensure Copilot CLI is installed and available on PATH.", ex);
         }
 
@@ -222,10 +343,6 @@ public sealed class CopilotClient
         var stdoutTask = PumpStdoutAsync(process, requestState, timeoutCts.Token);
         var stderrTask = ReadAllStderrAsync(process, timeoutCts.Token);
 
-        await process.StandardInput.WriteAsync(prompt.AsMemory(), timeoutCts.Token);
-        await process.StandardInput.WriteLineAsync();
-        process.StandardInput.Close();
-
         try
         {
             await Task.WhenAll(stdoutTask, stderrTask, process.WaitForExitAsync(timeoutCts.Token));
@@ -233,30 +350,130 @@ public sealed class CopilotClient
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             SafeKill(process);
+            execSw.Stop();
+            _logger.LogWarning(
+                "Copilot CLI process timed out. RequestId={RequestId}, Mode={Mode}, ResumeSessionId={ResumeSessionId}, ElapsedMs={ElapsedMs}",
+                requestId,
+                mode,
+                resumeSessionId ?? "-",
+                execSw.ElapsedMilliseconds);
             throw new TimeoutException($"Copilot CLI response timed out after {_options.Cli.ResponseTimeoutSeconds} seconds.");
         }
         catch (OperationCanceledException)
         {
             SafeKill(process);
+            execSw.Stop();
+            _logger.LogInformation(
+                "Copilot CLI process canceled. RequestId={RequestId}, Mode={Mode}, ResumeSessionId={ResumeSessionId}, ElapsedMs={ElapsedMs}",
+                requestId,
+                mode,
+                resumeSessionId ?? "-",
+                execSw.ElapsedMilliseconds);
             throw;
         }
+
+        execSw.Stop();
 
         if (process.ExitCode != 0)
         {
             var stderr = await stderrTask;
+            _logger.LogWarning(
+                "Copilot CLI process exited with non-zero code. RequestId={RequestId}, Mode={Mode}, ResumeSessionId={ResumeSessionId}, ExitCode={ExitCode}, ElapsedMs={ElapsedMs}, StderrPreview={StderrPreview}",
+                requestId,
+                mode,
+                resumeSessionId ?? "-",
+                process.ExitCode,
+                execSw.ElapsedMilliseconds,
+                TruncateForLog(stderr, 500));
+
             var message = BuildCliFailureMessage(process.ExitCode, stderr);
             throw new InvalidOperationException(message);
         }
 
         var output = requestState.Buffer.ToString();
+        var stderrFinal = await stderrTask;
+
         if (string.IsNullOrWhiteSpace(output))
         {
-            var stderr = await stderrTask;
-            if (!string.IsNullOrWhiteSpace(stderr))
+            if (!string.IsNullOrWhiteSpace(stderrFinal))
             {
-                throw new InvalidOperationException($"Copilot CLI returned no output. STDERR: {stderr}");
+                _logger.LogWarning(
+                    "Copilot CLI returned no output with stderr. RequestId={RequestId}, Mode={Mode}, ResumeSessionId={ResumeSessionId}, ElapsedMs={ElapsedMs}, StderrPreview={StderrPreview}",
+                    requestId,
+                    mode,
+                    resumeSessionId ?? "-",
+                    execSw.ElapsedMilliseconds,
+                    TruncateForLog(stderrFinal, 500));
+
+                throw new InvalidOperationException($"Copilot CLI returned no output. STDERR: {stderrFinal}");
             }
+
+            _logger.LogWarning(
+                "Copilot CLI returned no output and no stderr. RequestId={RequestId}, Mode={Mode}, ResumeSessionId={ResumeSessionId}, ElapsedMs={ElapsedMs}",
+                requestId,
+                mode,
+                resumeSessionId ?? "-",
+                execSw.ElapsedMilliseconds);
         }
+        else
+        {
+            if (!string.IsNullOrWhiteSpace(stderrFinal))
+            {
+                _logger.LogDebug(
+                    "Copilot CLI process completed with stderr content. RequestId={RequestId}, StderrPreview={StderrPreview}",
+                    requestId,
+                    TruncateForLog(stderrFinal, 500));
+            }
+
+            _logger.LogInformation(
+                "Copilot CLI process completed. RequestId={RequestId}, Mode={Mode}, ResumeSessionId={ResumeSessionId}, ExitCode={ExitCode}, ElapsedMs={ElapsedMs}, OutputChars={OutputChars}, ToolUsed={ToolUsed}, StderrChars={StderrChars}",
+                requestId,
+                mode,
+                resumeSessionId ?? "-",
+                process.ExitCode,
+                execSw.ElapsedMilliseconds,
+                output.Length,
+                requestState.ToolUsed,
+                stderrFinal.Length);
+        }
+    }
+
+    private static bool TryGetResumeSessionId(ProcessStartInfo startInfo, out string? sessionId)
+    {
+        for (var i = 0; i < startInfo.ArgumentList.Count; i++)
+        {
+            if (!string.Equals(startInfo.ArgumentList[i], "--resume", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (i + 1 < startInfo.ArgumentList.Count)
+            {
+                sessionId = startInfo.ArgumentList[i + 1];
+                return true;
+            }
+
+            break;
+        }
+
+        sessionId = null;
+        return false;
+    }
+
+    private static string TruncateForLog(string? value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var normalized = value.Replace("\r", string.Empty).Replace("\n", " | ").Trim();
+        if (normalized.Length <= maxLength)
+        {
+            return normalized;
+        }
+
+        return normalized[..maxLength] + "...";
     }
 
     private async Task PumpStdoutAsync(Process process, CopilotRequestState requestState, CancellationToken cancellationToken)
@@ -299,13 +516,20 @@ public sealed class CopilotClient
             return;
         }
 
-        if (requestState.Buffer.Length > 0 && line[0] != '{')
+        var isStructuredEvent = line[0] == '{';
+        var prefixLineBreak = requestState.Buffer.Length > 0 && !isStructuredEvent;
+
+        if (prefixLineBreak)
         {
             requestState.Buffer.AppendLine();
         }
 
         requestState.Buffer.Append(content);
-        await requestState.OnDelta(content, cancellationToken);
+        var outboundDelta = prefixLineBreak
+            ? $"\n{content}"
+            : content;
+
+        await requestState.OnDelta(outboundDelta, cancellationToken);
     }
 
     private static CliEventParseResult TryParseCliEvent(string rawLine)

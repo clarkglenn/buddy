@@ -2,6 +2,7 @@ using CopilotClient = global::Server.Services.CopilotClient;
 using IMcpServerResolver = global::Server.Services.IMcpServerResolver;
 using McpSetupException = global::Server.Services.McpSetupException;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace Buddy.Server.Services.Messaging;
 
@@ -62,6 +63,8 @@ Status:
     private async Task HandlePromptAsync(IncomingMessage message, CancellationToken cancellationToken)
     {
         const string token = "";
+        Task thinkingTask = Task.CompletedTask;
+        CancellationTokenSource? thinkingCts = null;
 
         if (LooksLikeEmailRequest(message.Text))
         {
@@ -80,15 +83,42 @@ Status:
         try
         {
             var resultBuffer = new StringBuilder();
-            var hasSentAnswerChunk = false;
+            var hasSentAnswerChunk = 0;
             const string thinkingPrefix = "[THINKING]";
-            var lastThinkingSentAt = (DateTimeOffset?)null;
-            var thinkingThrottle = TimeSpan.FromSeconds(2);
-            const string thinkingMessage = "Still working…";
+            var thinkingThrottle = TimeSpan.FromSeconds(1);
+            var thinkingDotCount = 1;
             var lastAnswerUpdateAt = (DateTimeOffset?)null;
             var updateThrottle = TimeSpan.FromMilliseconds(900);
             var replyTs = TryGetContextValue(message.Context, MessagingContextKeys.ReplyTs);
             var lastRenderedMessage = string.Empty;
+
+            thinkingCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            thinkingTask = Task.Run(async () =>
+            {
+                try
+                {
+                    while (!thinkingCts.Token.IsCancellationRequested)
+                    {
+                        await Task.Delay(thinkingThrottle, thinkingCts.Token);
+
+                        if (Volatile.Read(ref hasSentAnswerChunk) == 1)
+                        {
+                            break;
+                        }
+
+                        thinkingDotCount = (thinkingDotCount % 3) + 1;
+                        var thinkingMessage = new string('.', thinkingDotCount);
+                        var heartbeatResult = await UpsertResponseAsync(message.From, thinkingMessage, message.Context, replyTs, MessageStyle.Thinking, thinkingCts.Token);
+                        if (heartbeatResult.Success && !string.IsNullOrWhiteSpace(heartbeatResult.MessageTs))
+                        {
+                            replyTs = heartbeatResult.MessageTs;
+                        }
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }, thinkingCts.Token);
 
             // Stream the response
             var response = await _copilotClient.StreamCopilotResponseAsync(
@@ -103,22 +133,6 @@ Status:
 
                     if (delta.StartsWith(thinkingPrefix, StringComparison.OrdinalIgnoreCase))
                     {
-                        if (hasSentAnswerChunk)
-                        {
-                            return;
-                        }
-
-                        var now = DateTimeOffset.UtcNow;
-                        if (lastThinkingSentAt == null || now - lastThinkingSentAt >= thinkingThrottle)
-                        {
-                            lastThinkingSentAt = now;
-                            var heartbeatResult = await UpsertResponseAsync(message.From, thinkingMessage, message.Context, replyTs, MessageStyle.Thinking, ct);
-                            if (heartbeatResult.Success && !string.IsNullOrWhiteSpace(heartbeatResult.MessageTs))
-                            {
-                                replyTs = heartbeatResult.MessageTs;
-                            }
-                        }
-
                         return;
                     }
 
@@ -128,18 +142,21 @@ Status:
                         return;
                     }
 
-                    var userFacingDelta = SanitizeForUserFacingOutput(sanitizedDelta);
+                    var userFacingDelta = SanitizeForUserFacingOutput(sanitizedDelta, trimOuterWhitespace: false);
                     if (string.IsNullOrWhiteSpace(userFacingDelta))
                     {
                         return;
                     }
 
-                    if (!hasSentAnswerChunk && LooksLikeInternalProgress(userFacingDelta))
+                    if (Volatile.Read(ref hasSentAnswerChunk) == 0 && LooksLikeInternalProgress(userFacingDelta))
                     {
                         return;
                     }
 
-                    hasSentAnswerChunk = true;
+                    if (Interlocked.CompareExchange(ref hasSentAnswerChunk, 1, 0) == 0)
+                    {
+                        thinkingCts.Cancel();
+                    }
 
                     resultBuffer.Append(userFacingDelta);
 
@@ -216,6 +233,29 @@ Status:
             _logger.LogError(ex, "Error handling prompt for {User}", message.From);
             await SendMessageAsync(message.From, "❌ Request failed and was not completed. Please try again.", cancellationToken, message.Context);
         }
+        finally
+        {
+            if (thinkingCts != null)
+            {
+                try
+                {
+                    thinkingCts.Cancel();
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    await thinkingTask;
+                }
+                catch (OperationCanceledException)
+                {
+                }
+
+                thinkingCts.Dispose();
+            }
+        }
     }
 
     private async Task<MessageSendResult> SendMessageAsync(PlatformUser user, string message, CancellationToken cancellationToken, Dictionary<string, string>? context, MessageStyle style = MessageStyle.Default)
@@ -278,6 +318,11 @@ Status:
 
     private static string SanitizeForUserFacingOutput(string content)
     {
+        return SanitizeForUserFacingOutput(content, trimOuterWhitespace: true);
+    }
+
+    private static string SanitizeForUserFacingOutput(string content, bool trimOuterWhitespace)
+    {
         if (string.IsNullOrWhiteSpace(content))
         {
             return string.Empty;
@@ -299,7 +344,47 @@ Status:
             kept.Add(line);
         }
 
-        return string.Join("\n", kept).Trim();
+        var sanitized = string.Join("\n", kept);
+        sanitized = NormalizeInlineDashListFormatting(sanitized);
+        return trimOuterWhitespace ? sanitized.Trim() : sanitized;
+    }
+
+    private static string NormalizeInlineDashListFormatting(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content) || content.Contains('\n', StringComparison.Ordinal))
+        {
+            return content;
+        }
+
+        var dashDelimiterCount = Regex.Matches(content, "\\s-\\s").Count;
+        if (dashDelimiterCount < 3)
+        {
+            return content;
+        }
+
+        var splitIndex = content.IndexOf(':');
+        if (splitIndex < 0 || splitIndex >= content.Length - 1)
+        {
+            return content;
+        }
+
+        var intro = content[..(splitIndex + 1)].TrimEnd();
+        var remainder = content[(splitIndex + 1)..].Trim();
+        if (string.IsNullOrWhiteSpace(remainder))
+        {
+            return content;
+        }
+
+        var parts = remainder
+            .Split(" - ", StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+        if (parts.Length < 3)
+        {
+            return content;
+        }
+
+        var bullets = parts.Select(static part => $"- {part}");
+        return $"{intro}\n{string.Join("\n", bullets)}";
     }
 
     private static bool ShouldSuppressOperationalLine(string line)
@@ -310,6 +395,12 @@ Status:
         }
 
         var trimmed = line.TrimStart();
+
+        if (LooksLikeToolTraceLine(trimmed))
+        {
+            return true;
+        }
+
         if (trimmed.StartsWith("❌", StringComparison.Ordinal)
             || trimmed.StartsWith("⚠️", StringComparison.Ordinal)
             || trimmed.StartsWith("✅", StringComparison.Ordinal))
@@ -335,6 +426,40 @@ Status:
                 || normalized.Contains("cannot", StringComparison.Ordinal)
                 || normalized.Contains("couldn't", StringComparison.Ordinal)
                 || normalized.Contains("failed", StringComparison.Ordinal));
+    }
+
+    private static bool LooksLikeToolTraceLine(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return false;
+        }
+
+        var trimmed = line.Trim();
+        var normalized = trimmed.ToLowerInvariant();
+
+        if (trimmed.StartsWith("●", StringComparison.Ordinal)
+            || trimmed.StartsWith("└", StringComparison.Ordinal)
+            || trimmed.StartsWith("├", StringComparison.Ordinal)
+            || trimmed.StartsWith("- ", StringComparison.Ordinal)
+            || trimmed.StartsWith("• ", StringComparison.Ordinal))
+        {
+            if (normalized.Contains("mcp", StringComparison.Ordinal)
+                || normalized.Contains("tool", StringComparison.Ordinal)
+                || normalized.Contains("gmail-", StringComparison.Ordinal)
+                || normalized.Contains("chatgpt", StringComparison.Ordinal)
+                || normalized.Contains("id:", StringComparison.Ordinal)
+                || normalized.Contains("function", StringComparison.Ordinal)
+                || normalized.Contains("run_in_terminal", StringComparison.Ordinal)
+                || normalized.Contains("apply_patch", StringComparison.Ordinal)
+                || normalized.Contains("search_emails", StringComparison.Ordinal)
+                || normalized.Contains("send_email", StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool LooksLikeInternalProgress(string delta)

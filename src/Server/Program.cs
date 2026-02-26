@@ -2,27 +2,15 @@ using Server.Options;
 using Server.Services;
 using Buddy.Server.Services.Messaging;
 using Buddy.Server.Options;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 
-var builder = WebApplication.CreateBuilder(args);
+var builder = Host.CreateApplicationBuilder(args);
 
 if (builder.Environment.IsDevelopment())
 {
     builder.Configuration.AddUserSecrets<Program>(optional: true);
 }
-
-builder.Services.AddControllers();
-builder.Services.AddCors(options =>
-{
-    var origins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? Array.Empty<string>();
-    options.AddDefaultPolicy(policy =>  
-    {
-        policy.WithOrigins(origins)
-            .AllowAnyHeader()
-            .AllowAnyMethod()
-            .AllowCredentials();
-    });
-});
 
 builder.Services.AddOptions<CopilotOptions>()
     .BindConfiguration(CopilotOptions.SectionName)
@@ -47,6 +35,7 @@ if (messagingConfig?.Slack?.UseSocketMode == true)
 }
 
 builder.Services.AddHostedService<McpAvailabilityAnnouncementService>();
+builder.Services.AddHostedService<CopilotWarmupService>();
 
 builder.Services.AddSingleton<ICopilotSessionStore, CopilotSessionStore>();
 builder.Services.AddSingleton<IMcpServerResolver, McpServerResolver>();
@@ -74,10 +63,6 @@ StartupPreflight.LogCommandAvailability(startupLogger, "copilot", "pwsh", "power
 var copilotOptions = app.Services.GetRequiredService<IOptions<CopilotOptions>>().Value;
 StartupPreflight.LogRuntimeContext(startupLogger, copilotOptions.McpDiscovery.UserConfigPath);
 
-app.UseCors();
-
-app.MapControllers();
-
-app.Run();
+await app.RunAsync();
 
 public partial class Program { }

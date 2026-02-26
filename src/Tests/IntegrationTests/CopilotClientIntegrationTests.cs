@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.FileProviders;
@@ -300,6 +301,40 @@ GMAIL_VERIFY:<found|not_found|failed>;DETAIL:<short>
         Assert.True(success, diagnostics.ToString());
     }
 
+    [Fact]
+    public async Task CopilotSessionEntry_DisposeAsync_kills_running_process()
+    {
+        var process = StartLongRunningProcess();
+
+        var entry = new CopilotSessionEntry
+        {
+            CliProcess = process
+        };
+
+        await entry.DisposeAsync();
+
+        Assert.Null(entry.CliProcess);
+    }
+
+    [Fact]
+    public async Task CopilotSessionStore_RemoveAsync_disposes_session_process()
+    {
+        var options = Options.Create(new CopilotOptions());
+        var store = new CopilotSessionStore(options, NullLogger<CopilotSessionStore>.Instance);
+
+        var process = StartLongRunningProcess();
+
+        var entry = new CopilotSessionEntry
+        {
+            CliProcess = process
+        };
+
+        _ = await store.GetOrCreateAsync("session-with-process", _ => Task.FromResult(entry), CancellationToken.None);
+        await store.RemoveAsync("session-with-process", CancellationToken.None);
+
+        Assert.Null(entry.CliProcess);
+    }
+
     private static bool TryGetGmailArgs(McpServerResolution resolution, out string[] args)
     {
         args = [];
@@ -325,6 +360,30 @@ GMAIL_VERIFY:<found|not_found|failed>;DETAIL:<short>
             .ToArray();
 
         return args.Length > 0;
+    }
+
+    private static Process StartLongRunningProcess()
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "powershell",
+            Arguments = "-NoProfile -Command Start-Sleep -Seconds 30",
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        var process = new Process
+        {
+            StartInfo = startInfo,
+            EnableRaisingEvents = true
+        };
+
+        var started = process.Start();
+        Assert.True(started);
+        return process;
     }
 
     private sealed class TestMcpServerResolver : IMcpServerResolver

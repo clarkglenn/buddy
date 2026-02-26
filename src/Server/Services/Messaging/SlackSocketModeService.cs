@@ -572,7 +572,7 @@ public class SlackSocketModeService : BackgroundService
             var sendResult = await provider.SendMessageAsync(new SendMessageParams
             {
                 User = message.From,
-                Message = "On it",
+                Message = ".",
                 Context = message.Context
             }, cancellationToken);
 

@@ -1,4 +1,5 @@
 using System.Text;
+using System.Diagnostics;
 using Microsoft.Extensions.Options;
 using Server.Options;
 
@@ -140,6 +141,8 @@ public sealed class CopilotSessionEntry : IAsyncDisposable
     public bool IsFaulted { get; private set; }
     public CopilotRequestState? CurrentRequest { get; set; }
     public IReadOnlyList<CopilotConversationTurn> ConversationHistory => _conversationHistory;
+    public Process? CliProcess { get; set; }
+    public string CliSessionId { get; } = Guid.NewGuid().ToString("D");
 
     private readonly List<CopilotConversationTurn> _conversationHistory = [];
 
@@ -179,6 +182,29 @@ public sealed class CopilotSessionEntry : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        var process = CliProcess;
+        CliProcess = null;
+
+        if (process != null)
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync();
+                }
+            }
+            catch
+            {
+                // Ignore best-effort shutdown errors.
+            }
+            finally
+            {
+                process.Dispose();
+            }
+        }
+
         await Task.CompletedTask;
     }
 }

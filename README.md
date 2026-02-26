@@ -1,6 +1,6 @@
 # Buddy Copilot
 
-A minimal .NET 10 local server that uses Copilot CLI and streams responses over HTTP and SignalR.
+A minimal .NET 10 console server that uses Copilot CLI and messaging providers.
 
 ## Requirements
 

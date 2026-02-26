@@ -89,9 +89,68 @@ public sealed class MessageHandlerServiceFinalStatusTests
         Assert.Equal("✅ Completed successfully.", result);
     }
 
+    [Fact]
+    public void SanitizeForUserFacingOutput_removes_tool_trace_lines()
+    {
+        const string content = "● gmail-search_emails: in:inbox└ ID: 19c9b225d1e95c20\nDe fem senaste mailen innehåller:\n• Mail 1\n• Mail 2";
+
+        var result = InvokePrivateStatic<string>("SanitizeForUserFacingOutput", content);
+
+        Assert.Equal("De fem senaste mailen innehåller:\n• Mail 1\n• Mail 2", result);
+    }
+
+    [Fact]
+    public void SanitizeForUserFacingOutput_can_preserve_leading_newline_for_streaming()
+    {
+        const string content = "\n- Punkt 1";
+
+        var result = InvokePrivateStatic<string>("SanitizeForUserFacingOutput", content, false);
+
+        Assert.Equal("\n- Punkt 1", result);
+    }
+
+    [Fact]
+    public void SanitizeForUserFacingOutput_formats_inline_dash_list_to_multiline_bullets()
+    {
+        const string content = "Här är en sammanfattning: Facebook - SkiStar - Base44 - Substack";
+
+        var result = InvokePrivateStatic<string>("SanitizeForUserFacingOutput", content);
+
+        Assert.Equal("Här är en sammanfattning:\n- Facebook\n- SkiStar\n- Base44\n- Substack", result);
+    }
+
     private static T InvokePrivateStatic<T>(string methodName, params object[] args)
     {
-        var method = typeof(MessageHandlerService).GetMethod(methodName, BindingFlags.NonPublic | BindingFlags.Static);
+        var methods = typeof(MessageHandlerService)
+            .GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
+            .Where(m => m.Name == methodName)
+            .ToArray();
+
+        var method = methods.FirstOrDefault(m =>
+        {
+            var parameters = m.GetParameters();
+            if (parameters.Length != args.Length)
+            {
+                return false;
+            }
+
+            for (var i = 0; i < parameters.Length; i++)
+            {
+                var arg = args[i];
+                if (arg == null)
+                {
+                    continue;
+                }
+
+                if (!parameters[i].ParameterType.IsInstanceOfType(arg))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        });
+
         Assert.NotNull(method);
 
         var result = method!.Invoke(null, args);

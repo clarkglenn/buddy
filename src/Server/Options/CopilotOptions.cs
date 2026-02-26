@@ -17,6 +17,31 @@ public sealed class CopilotOptions
 public sealed class CopilotCliOptions
 {
     /// <summary>
+    /// When true, keep one Copilot CLI process alive per conversation key and reuse it for subsequent turns.
+    /// </summary>
+    public bool ReuseProcessPerSession { get; init; } = true;
+
+    /// <summary>
+    /// When true, run warmup Copilot CLI requests during server startup.
+    /// </summary>
+    public bool WarmupOnStartup { get; init; } = true;
+
+    /// <summary>
+    /// Number of warmup sessions to initialize during startup.
+    /// </summary>
+    public int WarmupSessionCount { get; init; } = 1;
+
+    /// <summary>
+    /// Timeout for each warmup request.
+    /// </summary>
+    public int WarmupTimeoutSeconds { get; init; } = 30;
+
+    /// <summary>
+    /// When true, MCP config is only attached for prompts that likely need tools.
+    /// </summary>
+    public bool AttachMcpOnlyWhenLikelyToolUse { get; init; } = true;
+
+    /// <summary>
     /// Copilot CLI executable name or absolute path.
     /// </summary>
     public string Command { get; init; } = "copilot";
