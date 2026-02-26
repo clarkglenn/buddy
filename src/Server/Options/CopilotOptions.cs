@@ -5,65 +5,48 @@ public sealed class CopilotOptions
     public const string SectionName = "Copilot";
 
     /// <summary>
-    /// The AI model to use for chat completions.
-    /// Examples: "gpt-5", "claude-sonnet-4.5", "copilot-model"
-    /// </summary>
-    public string Model { get; init; } = "gpt-5";
-
-    /// <summary>
-    /// Optional system message appended to every session.
-    /// </summary>
-    public string? SystemMessage { get; init; }
-
-    /// <summary>
     /// Time-to-live for in-memory Copilot sessions (minutes).
     /// </summary>
     public int SessionTtlMinutes { get; init; } = 60;
 
-    /// <summary>
-    /// Default Copilot mode.
-    /// Common values: "agent", "ask", "auto", or "code" (depending on SDK/model support).
-    /// </summary>
-    public string DefaultMode { get; init; } = "agent";
-
-    public ToolAccessOptions ToolAccess { get; init; } = new();
+    public CopilotCliOptions Cli { get; init; } = new();
 
     public McpDiscoveryOptions McpDiscovery { get; init; } = new();
-
-    public ToolUsePolicyOptions ToolUsePolicy { get; init; } = new();
 }
 
-public sealed class ToolAccessOptions
+public sealed class CopilotCliOptions
 {
     /// <summary>
-    /// When true, do not apply any tool allow/deny filtering.
+    /// Copilot CLI executable name or absolute path.
     /// </summary>
-    public bool AllowAll { get; init; } = true;
+    public string Command { get; init; } = "copilot";
 
     /// <summary>
-    /// When true, automatically approve all tool permission checks during SDK execution.
+    /// Additional CLI arguments passed to the Copilot process.
     /// </summary>
-    public bool AutoApproveToolPermissions { get; init; } = true;
+    public string[] Arguments { get; init; } = [];
 
     /// <summary>
-    /// Allowlist of tool names to enable when AllowAll is false.
+    /// Stream output mode expected from Copilot CLI.
+    /// Supported values: "plain-text" and "json-stream".
     /// </summary>
-    public string[]? AvailableTools { get; init; }
+    public string StreamMode { get; init; } = "plain-text";
 
     /// <summary>
-    /// Denylist of tool names to disable when AllowAll is false.
+    /// Maximum time to wait for a single CLI response.
     /// </summary>
-    public string[]? ExcludedTools { get; init; }
+    public int ResponseTimeoutSeconds { get; init; } = 300;
 
     /// <summary>
-    /// When true, add a system message advertising full tool access.
+    /// Number of conversation turns retained per Slack thread/session.
     /// </summary>
-    public bool AdvertiseAllTools { get; init; } = true;
+    public int MaxConversationTurns { get; init; } = 12;
 
     /// <summary>
-    /// System message used when advertising full tool access.
+    /// Environment variable used to pass the resolved merged MCP config directory to the CLI process.
     /// </summary>
-    public string AdvertiseMessage { get; init; } = "You have access to MCP tools configured for this session. Only use tools that are actually available/allowed, and ensure any required executables (for example: pwsh, node, npx) are installed and on PATH.";
+    public string McpConfigDirEnvironmentVariable { get; init; } = "COPILOT_CONFIG_DIR";
+
 }
 
 public sealed class McpDiscoveryOptions
@@ -94,35 +77,3 @@ public sealed class McpDiscoveryOptions
     public string? UserConfigPath { get; init; }
 }
 
-public sealed class ToolUsePolicyOptions
-{
-    /// <summary>
-    /// Enables policy checks that require tool usage for non-trivial prompts.
-    /// </summary>
-    public bool Enabled { get; init; } = true;
-
-    /// <summary>
-    /// When true, short/simple questions may be answered directly without tools.
-    /// </summary>
-    public bool AllowDirectResponsesForTrivialQuestions { get; init; } = true;
-
-    /// <summary>
-    /// Maximum prompt length (characters) considered for trivial-question classification.
-    /// </summary>
-    public int TrivialQuestionMaxChars { get; init; } = 220;
-
-    /// <summary>
-    /// When true, requests that violate policy fail immediately without retries.
-    /// </summary>
-    public bool FailImmediatelyOnViolation { get; init; } = true;
-
-    /// <summary>
-    /// User-facing message returned when a non-trivial response does not use tools.
-    /// </summary>
-    public string ViolationMessage { get; init; } = "Policy requires using MCP/CLI tools for non-trivial requests. Ask a concise factual question for direct Q&A, or rephrase the request to run through tools.";
-
-    /// <summary>
-    /// Advisory categories for prompt guidance.
-    /// </summary>
-    public string[] PreferredToolCategories { get; init; } = ["MCP", "CLI", "ReadOnlyHelpers"];
-}

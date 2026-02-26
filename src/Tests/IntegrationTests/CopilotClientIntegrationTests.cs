@@ -17,17 +17,13 @@ public sealed class CopilotClientIntegrationTests
     public async Task StreamCopilotResponseAsync_returns_content()
     {
         var token = Environment.GetEnvironmentVariable("COPILOT_TEST_TOKEN");
-        var model = Environment.GetEnvironmentVariable("COPILOT_TEST_MODEL");
 
-        if (string.IsNullOrWhiteSpace(token) || string.IsNullOrWhiteSpace(model))
+        if (string.IsNullOrWhiteSpace(token))
         {
             return;
         }
 
-        var options = Options.Create(new CopilotOptions
-        {
-            Model = model
-        });
+        var options = Options.Create(new CopilotOptions());
 
         var sessionStore = new CopilotSessionStore(options, NullLogger<CopilotSessionStore>.Instance);
         var client = new CopilotClient(
@@ -63,9 +59,7 @@ public sealed class CopilotClientIntegrationTests
         }
 
         var token = Environment.GetEnvironmentVariable("COPILOT_TEST_TOKEN");
-        var model = Environment.GetEnvironmentVariable("COPILOT_TEST_MODEL");
         Assert.False(string.IsNullOrWhiteSpace(token), "COPILOT_TEST_TOKEN is required when ENABLE_LIVE_GMAIL_SEND_TEST=true.");
-        Assert.False(string.IsNullOrWhiteSpace(model), "COPILOT_TEST_MODEL is required when ENABLE_LIVE_GMAIL_SEND_TEST=true.");
 
         var mcpConfigPath = Environment.GetEnvironmentVariable("COPILOT_TEST_MCP_CONFIG_PATH");
         Assert.False(string.IsNullOrWhiteSpace(mcpConfigPath), "COPILOT_TEST_MCP_CONFIG_PATH is required when ENABLE_LIVE_GMAIL_SEND_TEST=true.");
@@ -79,7 +73,6 @@ public sealed class CopilotClientIntegrationTests
 
         var options = Options.Create(new CopilotOptions
         {
-            Model = model,
             McpDiscovery = new McpDiscoveryOptions
             {
                 Enabled = true,
@@ -171,7 +164,6 @@ VERIFY_STATUS:not_found;SUBJECT:{subject}
         }
 
         var token = Environment.GetEnvironmentVariable("COPILOT_TEST_TOKEN");
-        var model = Environment.GetEnvironmentVariable("COPILOT_TEST_MODEL");
         var mcpConfigPath = Environment.GetEnvironmentVariable("COPILOT_TEST_MCP_CONFIG_PATH");
         var recipient = Environment.GetEnvironmentVariable("COPILOT_TEST_GMAIL_RECIPIENT");
 
@@ -181,13 +173,11 @@ VERIFY_STATUS:not_found;SUBJECT:{subject}
         }
 
         Assert.False(string.IsNullOrWhiteSpace(token), "COPILOT_TEST_TOKEN is required when ENABLE_LIVE_GMAIL_DIAG_TEST=true.");
-        Assert.False(string.IsNullOrWhiteSpace(model), "COPILOT_TEST_MODEL is required when ENABLE_LIVE_GMAIL_DIAG_TEST=true.");
         Assert.False(string.IsNullOrWhiteSpace(mcpConfigPath), "COPILOT_TEST_MCP_CONFIG_PATH is required when ENABLE_LIVE_GMAIL_DIAG_TEST=true.");
         Assert.True(File.Exists(mcpConfigPath), $"COPILOT_TEST_MCP_CONFIG_PATH does not exist: {mcpConfigPath}");
 
         var options = Options.Create(new CopilotOptions
         {
-            Model = model,
             McpDiscovery = new McpDiscoveryOptions
             {
                 Enabled = true,

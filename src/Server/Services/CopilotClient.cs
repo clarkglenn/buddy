@@ -1,9 +1,9 @@
 using System.Collections.Generic;
-using System.Text.RegularExpressions;
-using GitHub.Copilot.SDK;
+using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Server.Options;
-using CopilotSDKClient = GitHub.Copilot.SDK.CopilotClient;
 
 namespace Server.Services;
 
@@ -16,23 +16,7 @@ public sealed class CopilotClient
 
     private const string ChannelContextKey = "channel";
     private const string ThreadContextKey = "thread_ts";
-    private static readonly string[] BuiltInTools =
-    [
-        "run_in_terminal",
-        "run_task",
-        "runTests",
-        "read_file",
-        "grep_search",
-        "file_search",
-        "list_dir",
-        "apply_patch"
-    ];
-
-    private static readonly string[] NonTrivialKeywords =
-    [
-        "code", "implement", "build", "compile", "run", "test", "fix", "bug", "debug", "refactor",
-        "class", "method", "function", "script", "file", "repository", "project", "deploy", "migration"
-    ];
+    private const string CopilotAllowAllEnvVar = "COPILOT_ALLOW_ALL";
 
     public CopilotClient(
         IOptions<CopilotOptions> options,
@@ -54,26 +38,33 @@ public sealed class CopilotClient
         Dictionary<string, string>? context = null,
         string? conversationUserKey = null)
     {
-        if (string.IsNullOrWhiteSpace(_options.Model))
+        if (string.IsNullOrWhiteSpace(_options.Cli.Command))
         {
-            throw new InvalidOperationException("Copilot model is not configured (Copilot:Model).");
+            throw new InvalidOperationException("Copilot CLI command is not configured (Copilot:Cli:Command).");
         }
+
+        if (!string.IsNullOrWhiteSpace(token))
+        {
+            _logger.LogDebug("Copilot token was provided but is ignored in CLI mode; machine-level CLI auth is used.");
+        }
+
         var conversationKey = BuildConversationKey(context, conversationUserKey);
 
         if (string.IsNullOrWhiteSpace(conversationKey))
         {
-            return await StreamWithEphemeralSessionAsync(token, prompt, onDelta, cancellationToken);
+            var ephemeralEntry = new CopilotSessionEntry();
+            return await StreamWithSessionAsync(ephemeralEntry, prompt, onDelta, cancellationToken, persistConversation: false);
         }
 
         var entry = await _sessionStore.GetOrCreateAsync(
             conversationKey,
-            ct => CreateSessionEntryAsync(token, ct),
+            static _ => Task.FromResult(new CopilotSessionEntry()),
             cancellationToken);
 
         await entry.Gate.WaitAsync(cancellationToken);
         try
         {
-            var response = await StreamWithSessionAsync(entry, prompt, onDelta, cancellationToken);
+            var response = await StreamWithSessionAsync(entry, prompt, onDelta, cancellationToken, persistConversation: true);
 
             if (entry.IsFaulted)
             {
@@ -88,20 +79,35 @@ public sealed class CopilotClient
         }
     }
 
-    public async Task<IReadOnlyList<string>> GetAvailableModelsAsync(string token, CancellationToken cancellationToken)
-    {
-        // The GitHub.Copilot.SDK does not expose a direct models endpoint.
-        // Return the configured model as the available option.
-        // In a real scenario, you might query a list endpoint if GitHub provides one.
-        return new[] { _options.Model };
-    }
-
     private string BuildPrompt(string prompt)
     {
-        var prefix = BuildPromptPrefix();
-        return string.IsNullOrWhiteSpace(prefix)
-            ? prompt
-            : string.Join(Environment.NewLine + Environment.NewLine, prefix, prompt);
+        return prompt;
+    }
+
+    private string BuildPromptWithHistory(CopilotSessionEntry entry, string prompt)
+    {
+        var basePrompt = BuildPrompt(prompt);
+
+        if (entry.ConversationHistory.Count == 0)
+        {
+            return basePrompt;
+        }
+
+        var history = new StringBuilder();
+        history.AppendLine("Conversation context from earlier turns:");
+
+        foreach (var turn in entry.ConversationHistory)
+        {
+            history.AppendLine("User:");
+            history.AppendLine(turn.UserPrompt);
+            history.AppendLine("Assistant:");
+            history.AppendLine(turn.AssistantResponse);
+            history.AppendLine();
+        }
+
+        history.AppendLine("Current user prompt:");
+        history.AppendLine(basePrompt);
+        return history.ToString();
     }
 
     private string? BuildConversationKey(Dictionary<string, string>? context, string? conversationUserKey)
@@ -129,173 +135,35 @@ public sealed class CopilotClient
         return null;
     }
 
-    private async Task<string> StreamWithEphemeralSessionAsync(
-        string token,
-        string prompt,
-        Func<string, CancellationToken, Task> onDelta,
-        CancellationToken cancellationToken)
-    {
-        await using var entry = await CreateSessionEntryAsync(token, cancellationToken);
-        return await StreamWithSessionAsync(entry, prompt, onDelta, cancellationToken);
-    }
-
-    private async Task<CopilotSessionEntry> CreateSessionEntryAsync(string token, CancellationToken cancellationToken)
-    {
-        var sdkClient = new CopilotSDKClient(new CopilotClientOptions
-        {
-            GithubToken = token
-        });
-
-        await sdkClient.StartAsync();
-
-        var sessionConfig = new SessionConfig
-        {
-            Model = _options.Model,
-            Streaming = true
-        };
-
-        var modeApplied = TrySetSessionConfigProperty(sessionConfig, "Mode", _options.DefaultMode)
-            || TrySetSessionConfigProperty(sessionConfig, "ChatMode", _options.DefaultMode)
-            || TrySetSessionConfigProperty(sessionConfig, "DefaultMode", _options.DefaultMode);
-
-        if (!modeApplied)
-        {
-            _logger.LogDebug("Copilot SDK does not expose a session mode property; proceeding without explicit mode. Requested mode: {Mode}", _options.DefaultMode);
-        }
-
-        if (_options.ToolAccess.AutoApproveToolPermissions)
-        {
-            sessionConfig.Hooks = new SessionHooks
-            {
-                OnPreToolUse = async (input, invocation) =>
-                {
-                    return new PreToolUseHookOutput
-                    {
-                        PermissionDecision = "allow",
-                        ModifiedArgs = input.ToolArgs
-                    };
-                }
-            };
-        }
-
-        if (!_options.ToolAccess.AllowAll)
-        {
-            if (_options.ToolAccess.AvailableTools is { Length: > 0 })
-            {
-                sessionConfig.AvailableTools = _options.ToolAccess.AvailableTools.ToList();
-            }
-
-            if (_options.ToolAccess.ExcludedTools is { Length: > 0 })
-            {
-                sessionConfig.ExcludedTools = _options.ToolAccess.ExcludedTools.ToList();
-            }
-        }
-
-        ApplyMcpServers(sessionConfig);
-
-        var session = await sdkClient.CreateSessionAsync(sessionConfig);
-        var entry = new CopilotSessionEntry(sdkClient, session);
-
-        session.On(evt =>
-        {
-            var request = entry.CurrentRequest;
-            if (request == null)
-            {
-                return;
-            }
-
-            switch (evt)
-            {
-                case AssistantReasoningDeltaEvent reasoningDelta:
-                    {
-                        var content = reasoningDelta.Data.DeltaContent ?? string.Empty;
-                        _ = request.OnDelta($"[THINKING] {content}", CancellationToken.None);
-                        break;
-                    }
-
-                case AssistantMessageDeltaEvent delta:
-                    {
-                        var content = delta.Data.DeltaContent ?? string.Empty;
-                        request.Buffer.Append(content);
-                        _ = request.OnDelta(content, CancellationToken.None);
-                        break;
-                    }
-
-                case AssistantReasoningEvent reasoning:
-                    {
-                        _logger.LogDebug("Copilot reasoning: {Content}", reasoning.Data.Content);
-                        break;
-                    }
-
-                case AssistantMessageEvent:
-                    {
-                        break;
-                    }
-
-                case SessionIdleEvent:
-                    {
-                        request.Done.TrySetResult(true);
-                        break;
-                    }
-
-                case SessionErrorEvent error:
-                    {
-                        entry.MarkFaulted();
-                        _logger.LogError("Copilot session error: {ErrorMessage}", error.Data.Message);
-                        request.Done.TrySetException(new InvalidOperationException($"Copilot session error: {error.Data.Message}"));
-                        break;
-                    }
-
-                default:
-                    {
-                        if (IsLikelyToolEvent(evt))
-                        {
-                            request.ToolUsed = true;
-                        }
-
-                        break;
-                    }
-            }
-        });
-
-        return entry;
-    }
-
     private async Task<string> StreamWithSessionAsync(
         CopilotSessionEntry entry,
         string prompt,
         Func<string, CancellationToken, Task> onDelta,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool persistConversation)
     {
-        var buffer = new System.Text.StringBuilder();
-        var requestState = new CopilotRequestState(buffer, onDelta, IsTrivialPrompt(prompt));
+        var buffer = new StringBuilder();
+        var requestState = new CopilotRequestState(buffer, onDelta);
         entry.CurrentRequest = requestState;
 
         try
         {
-            var enrichedPrompt = BuildPrompt(prompt);
-            await entry.Session.SendAsync(new MessageOptions { Prompt = enrichedPrompt });
-
-            var timeoutTask = Task.Delay(TimeSpan.FromMinutes(5), cancellationToken);
-            var completedTask = await Task.WhenAny(requestState.Done.Task, timeoutTask);
-
-            if (completedTask == timeoutTask)
-            {
-                _logger.LogWarning("Copilot response timeout after 5 minutes");
-                entry.MarkFaulted();
-                return buffer.ToString();
-            }
-
-            await requestState.Done.Task;
+            var enrichedPrompt = BuildPromptWithHistory(entry, prompt);
+            await ExecuteCliRequestAsync(enrichedPrompt, requestState, cancellationToken);
 
             var response = buffer.ToString();
-            EnforceToolUsePolicy(prompt, requestState.IsTrivialPrompt, requestState.ToolUsed, response);
+
+            if (persistConversation && !string.IsNullOrWhiteSpace(response))
+            {
+                entry.AddTurn(prompt, response, _options.Cli.MaxConversationTurns);
+            }
 
             return response;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error during Copilot streaming");
+            _logger.LogError(ex, "Error during Copilot CLI streaming");
+            entry.MarkFaulted();
             throw;
         }
         finally
@@ -305,8 +173,226 @@ public sealed class CopilotClient
         }
     }
 
-    private void ApplyMcpServers(SessionConfig sessionConfig)
+    private async Task ExecuteCliRequestAsync(string prompt, CopilotRequestState requestState, CancellationToken cancellationToken)
     {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = _options.Cli.Command,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+            WorkingDirectory = Environment.CurrentDirectory
+        };
+
+        foreach (var arg in _options.Cli.Arguments)
+        {
+            if (!string.IsNullOrWhiteSpace(arg))
+            {
+                startInfo.ArgumentList.Add(arg);
+            }
+        }
+
+        startInfo.ArgumentList.Add("--allow-all-tools");
+
+        ApplyCliEnvironment(startInfo);
+
+        using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+
+        try
+        {
+            if (!process.Start())
+            {
+                throw new InvalidOperationException("Failed to start Copilot CLI process.");
+            }
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"Failed to launch Copilot CLI command '{_options.Cli.Command}'. Ensure Copilot CLI is installed and available on PATH.", ex);
+        }
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (_options.Cli.ResponseTimeoutSeconds > 0)
+        {
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(_options.Cli.ResponseTimeoutSeconds));
+        }
+
+        var stdoutTask = PumpStdoutAsync(process, requestState, timeoutCts.Token);
+        var stderrTask = ReadAllStderrAsync(process, timeoutCts.Token);
+
+        await process.StandardInput.WriteAsync(prompt.AsMemory(), timeoutCts.Token);
+        await process.StandardInput.WriteLineAsync();
+        process.StandardInput.Close();
+
+        try
+        {
+            await Task.WhenAll(stdoutTask, stderrTask, process.WaitForExitAsync(timeoutCts.Token));
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            SafeKill(process);
+            throw new TimeoutException($"Copilot CLI response timed out after {_options.Cli.ResponseTimeoutSeconds} seconds.");
+        }
+        catch (OperationCanceledException)
+        {
+            SafeKill(process);
+            throw;
+        }
+
+        if (process.ExitCode != 0)
+        {
+            var stderr = await stderrTask;
+            var message = BuildCliFailureMessage(process.ExitCode, stderr);
+            throw new InvalidOperationException(message);
+        }
+
+        var output = requestState.Buffer.ToString();
+        if (string.IsNullOrWhiteSpace(output))
+        {
+            var stderr = await stderrTask;
+            if (!string.IsNullOrWhiteSpace(stderr))
+            {
+                throw new InvalidOperationException($"Copilot CLI returned no output. STDERR: {stderr}");
+            }
+        }
+    }
+
+    private async Task PumpStdoutAsync(Process process, CopilotRequestState requestState, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var line = await process.StandardOutput.ReadLineAsync(cancellationToken);
+            if (line == null)
+            {
+                break;
+            }
+
+            await HandleCliOutputLineAsync(line, requestState, cancellationToken);
+        }
+    }
+
+    private async Task HandleCliOutputLineAsync(string line, CopilotRequestState requestState, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return;
+        }
+
+        var result = TryParseCliEvent(line);
+
+        if (result.ToolUsed)
+        {
+            requestState.ToolUsed = true;
+        }
+
+        if (string.IsNullOrWhiteSpace(result.Content))
+        {
+            return;
+        }
+
+        var content = result.Content;
+        if (result.IsThinking)
+        {
+            await requestState.OnDelta($"[THINKING] {content}", cancellationToken);
+            return;
+        }
+
+        if (requestState.Buffer.Length > 0 && line[0] != '{')
+        {
+            requestState.Buffer.AppendLine();
+        }
+
+        requestState.Buffer.Append(content);
+        await requestState.OnDelta(content, cancellationToken);
+    }
+
+    private static CliEventParseResult TryParseCliEvent(string rawLine)
+    {
+        var trimmed = rawLine.Trim();
+        if (trimmed.StartsWith('{'))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(trimmed);
+                var root = document.RootElement;
+
+                var type = GetString(root, "type") ?? GetString(root, "event") ?? string.Empty;
+                var content =
+                    GetString(root, "delta")
+                    ?? GetString(root, "content")
+                    ?? GetString(root, "text")
+                    ?? GetNestedString(root, "data", "delta")
+                    ?? GetNestedString(root, "data", "content")
+                    ?? GetNestedString(root, "data", "text")
+                    ?? GetNestedString(root, "message", "content")
+                    ?? GetNestedString(root, "message", "text");
+
+                var isThinking = type.Contains("reason", StringComparison.OrdinalIgnoreCase)
+                    || type.Contains("thinking", StringComparison.OrdinalIgnoreCase);
+
+                var toolUsed = type.Contains("tool", StringComparison.OrdinalIgnoreCase)
+                    || type.Contains("mcp", StringComparison.OrdinalIgnoreCase)
+                    || type.Contains("function", StringComparison.OrdinalIgnoreCase)
+                    || type.Contains("command", StringComparison.OrdinalIgnoreCase);
+
+                if (!toolUsed)
+                {
+                    var role = GetString(root, "role") ?? GetNestedString(root, "message", "role") ?? string.Empty;
+                    toolUsed = role.Contains("tool", StringComparison.OrdinalIgnoreCase);
+                }
+
+                return new CliEventParseResult(content ?? string.Empty, isThinking, toolUsed);
+            }
+            catch (JsonException)
+            {
+                return new CliEventParseResult(trimmed, false, LooksLikeToolTrace(trimmed));
+            }
+        }
+
+        return new CliEventParseResult(trimmed, false, LooksLikeToolTrace(trimmed));
+    }
+
+    private static bool LooksLikeToolTrace(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        return value.Contains("tool", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("mcp:", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("run_in_terminal", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("apply_patch", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("runTests", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? GetString(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var value) || value.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return value.GetString();
+    }
+
+    private static string? GetNestedString(JsonElement element, string parentName, string childName)
+    {
+        if (!element.TryGetProperty(parentName, out var parent) || parent.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        return GetString(parent, childName);
+    }
+
+    private void ApplyCliEnvironment(ProcessStartInfo startInfo)
+    {
+        startInfo.Environment[CopilotAllowAllEnvVar] = "1";
+
         if (!_options.McpDiscovery.Enabled)
         {
             return;
@@ -322,290 +408,90 @@ public sealed class CopilotClient
         var serverNames = resolution.Servers.Keys
             .OrderBy(static name => name, StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        _logger.LogInformation(
-            "Attempting MCP setup for Copilot session. Servers={Servers}. ConfigDir={ConfigDir}",
-            string.Join(", ", serverNames),
-            string.IsNullOrWhiteSpace(resolution.ConfigDir) ? "<none>" : resolution.ConfigDir);
 
-        var appliedVia = string.Empty;
-        string? firstError = null;
-
-        if (TrySetSessionConfigPropertyWithDiagnostics(sessionConfig, "McpServers", resolution.Servers, out var mcpServersError))
+        if (string.IsNullOrWhiteSpace(resolution.ConfigDir))
         {
-            appliedVia = "McpServers";
-        }
-        else
-        {
-            firstError = mcpServersError;
-            _logger.LogWarning(
-                "Failed to bind MCP servers via SessionConfig.McpServers. Error={Error}",
-                string.IsNullOrWhiteSpace(mcpServersError) ? "n/a" : mcpServersError);
-        }
-
-        if (string.IsNullOrEmpty(appliedVia) && !string.IsNullOrWhiteSpace(resolution.ConfigDir))
-        {
-            if (TrySetSessionConfigPropertyWithDiagnostics(sessionConfig, "ConfigDir", resolution.ConfigDir, out var configDirError))
-            {
-                appliedVia = "ConfigDir";
-            }
-            else
-            {
-                _logger.LogWarning(
-                    "Failed to bind MCP config via SessionConfig.ConfigDir. Error={Error}",
-                    string.IsNullOrWhiteSpace(configDirError) ? "n/a" : configDirError);
-
-                if (string.IsNullOrWhiteSpace(firstError))
-                {
-                    firstError = configDirError;
-                }
-            }
-        }
-
-        if (!string.IsNullOrEmpty(appliedVia))
-        {
-            _logger.LogInformation(
-                "Loaded {Count} MCP server(s) for Copilot CLI via SessionConfig.{AppliedVia}.",
-                resolution.Servers.Count,
-                appliedVia);
-        }
-        else
-        {
-            var detail = $"Resolved MCP servers ({string.Join(", ", serverNames)}) but failed to bind to Copilot SDK session config.";
-            if (!string.IsNullOrWhiteSpace(firstError))
-            {
-                detail = $"{detail} Cause: {firstError}";
-            }
-
             throw new McpSetupException(
                 "MCP tools are temporarily unavailable for this Copilot session.",
                 serverNames,
-                detail);
+                "Resolved MCP servers but merged MCP config directory is unavailable.");
         }
+
+        if (string.IsNullOrWhiteSpace(_options.Cli.McpConfigDirEnvironmentVariable))
+        {
+            return;
+        }
+
+        startInfo.Environment[_options.Cli.McpConfigDirEnvironmentVariable] = resolution.ConfigDir;
+        _logger.LogInformation(
+            "Loaded {Count} MCP server(s) for Copilot CLI. ConfigDir={ConfigDir}",
+            resolution.Servers.Count,
+            resolution.ConfigDir);
     }
 
-    private static bool TrySetSessionConfigPropertyWithDiagnostics(
-        SessionConfig sessionConfig,
-        string propertyName,
-        object? value,
-        out string? error)
+    private static string BuildCliFailureMessage(int exitCode, string stderr)
     {
-        error = null;
-        var property = sessionConfig.GetType().GetProperty(propertyName);
-        if (property == null)
+        if (!string.IsNullOrWhiteSpace(stderr) && IsPermissionDeniedError(stderr))
         {
-            error = $"Property '{propertyName}' not found on SessionConfig.";
-            return false;
+            return "MCP permission denied. This session could not request interactive approval. Ensure Copilot CLI runs with --allow-all-tools (or COPILOT_ALLOW_ALL=1) and that Gmail MCP is already authorized for the runtime Windows user profile.";
         }
 
-        if (!property.CanWrite)
-        {
-            error = $"Property '{propertyName}' exists but is not writable.";
-            return false;
-        }
-
-        try
-        {
-            property.SetValue(sessionConfig, value);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            error = ex.Message;
-            return false;
-        }
+        return string.IsNullOrWhiteSpace(stderr)
+            ? $"Copilot CLI exited with code {exitCode}."
+            : $"Copilot CLI exited with code {exitCode}: {stderr}";
     }
 
-    private static bool TrySetSessionConfigProperty(SessionConfig sessionConfig, string propertyName, object? value)
+    private static bool IsPermissionDeniedError(string stderr)
     {
-        var property = sessionConfig.GetType().GetProperty(propertyName);
-        if (property == null || !property.CanWrite)
-        {
-            return false;
-        }
-
-        property.SetValue(sessionConfig, value);
-        return true;
+        var normalized = stderr.ToLowerInvariant();
+        return normalized.Contains("permission denied", StringComparison.Ordinal)
+            || normalized.Contains("could not request permission from user", StringComparison.Ordinal)
+            || normalized.Contains("not authorized", StringComparison.Ordinal);
     }
 
-    private string? BuildPromptPrefix()
+    private static async Task<string> ReadAllStderrAsync(Process process, CancellationToken cancellationToken)
     {
-        if (!_options.ToolAccess.AdvertiseAllTools && string.IsNullOrWhiteSpace(_options.SystemMessage))
+        var builder = new StringBuilder();
+        while (true)
         {
-            if (!_options.ToolUsePolicy.Enabled)
+            var line = await process.StandardError.ReadLineAsync(cancellationToken);
+            if (line == null)
             {
-                return null;
-            }
-        }
-
-        var parts = new List<string>();
-
-        if (!string.IsNullOrWhiteSpace(_options.SystemMessage))
-        {
-            parts.Add(_options.SystemMessage.Trim());
-        }
-
-        if (_options.ToolAccess.AdvertiseAllTools)
-        {
-            var message = string.IsNullOrWhiteSpace(_options.ToolAccess.AdvertiseMessage)
-                ? "You have access to MCP tools configured for this session. Only use tools that are actually available/allowed, and ensure any required executables (for example: pwsh, node, npx) are installed and on PATH."
-                : _options.ToolAccess.AdvertiseMessage.Trim();
-
-            var explicitTools = BuildExplicitToolsList();
-            if (!string.IsNullOrWhiteSpace(explicitTools))
-            {
-                message = $"{message} Explicit tools list: {explicitTools}.";
+                break;
             }
 
-            parts.Add(message);
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            if (builder.Length > 0)
+            {
+                builder.AppendLine();
+            }
+
+            builder.Append(line.Trim());
         }
 
-        if (_options.ToolUsePolicy.Enabled)
-        {
-            var categories = _options.ToolUsePolicy.PreferredToolCategories is { Length: > 0 }
-                ? string.Join(", ", _options.ToolUsePolicy.PreferredToolCategories)
-                : "MCP, CLI, read-only helper tools";
-
-            parts.Add($"Policy: For non-trivial requests, use tools instead of direct answers. Preferred categories: {categories}. Direct no-tool responses are only allowed for concise factual questions.");
-        }
-
-        return parts.Count == 0 ? null : string.Join(Environment.NewLine + Environment.NewLine, parts);
+        return builder.ToString();
     }
 
-    private string BuildExplicitToolsList()
+    private static void SafeKill(Process process)
     {
-        var tools = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var tool in GetBuiltInToolNames())
-        {
-            tools.Add(tool);
-        }
-
-        foreach (var tool in GetMcpToolNames())
-        {
-            tools.Add(tool);
-        }
-
-        return tools.Count == 0
-            ? string.Empty
-            : string.Join(", ", tools.OrderBy(static tool => tool, StringComparer.OrdinalIgnoreCase));
-    }
-
-    private IEnumerable<string> GetBuiltInToolNames()
-    {
-        IEnumerable<string> tools = !_options.ToolAccess.AllowAll && _options.ToolAccess.AvailableTools is { Length: > 0 }
-            ? _options.ToolAccess.AvailableTools
-            : BuiltInTools;
-
-        if (_options.ToolAccess.ExcludedTools is { Length: > 0 })
-        {
-            var excluded = new HashSet<string>(_options.ToolAccess.ExcludedTools, StringComparer.OrdinalIgnoreCase);
-            tools = tools.Where(tool => !excluded.Contains(tool));
-        }
-
-        return tools
-            .Where(tool => !string.IsNullOrWhiteSpace(tool))
-            .Select(tool => tool.Trim())
-            .Distinct(StringComparer.OrdinalIgnoreCase);
-    }
-
-    private IReadOnlyList<string> GetMcpToolNames()
-    {
-        if (!_options.McpDiscovery.Enabled)
-        {
-            return [];
-        }
-
         try
         {
-            var resolution = _mcpServerResolver.Resolve();
-            return resolution.ToolNames;
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
         }
-        catch (Exception ex)
+        catch
         {
-            _logger.LogWarning(ex, "Failed to resolve MCP tools for explicit prompt list.");
-            return [];
+            // Ignore best-effort shutdown errors.
         }
     }
 
-    private void EnforceToolUsePolicy(string prompt, bool isTrivialPrompt, bool toolUsed, string response)
-    {
-        if (!_options.ToolUsePolicy.Enabled)
-        {
-            return;
-        }
-
-        if (toolUsed)
-        {
-            return;
-        }
-
-        if (isTrivialPrompt && _options.ToolUsePolicy.AllowDirectResponsesForTrivialQuestions)
-        {
-            return;
-        }
-
-        if (!_options.ToolUsePolicy.FailImmediatelyOnViolation)
-        {
-            return;
-        }
-
-        _logger.LogWarning(
-            "Copilot tool-use policy violation detected. PromptLength={PromptLength}, ResponseLength={ResponseLength}, TrivialPrompt={TrivialPrompt}",
-            prompt.Length,
-            response.Length,
-            isTrivialPrompt);
-
-        throw new InvalidOperationException(_options.ToolUsePolicy.ViolationMessage);
-    }
-
-    private bool IsTrivialPrompt(string prompt)
-    {
-        if (string.IsNullOrWhiteSpace(prompt))
-        {
-            return true;
-        }
-
-        var normalized = prompt.Trim();
-        if (normalized.Length > _options.ToolUsePolicy.TrivialQuestionMaxChars)
-        {
-            return false;
-        }
-
-        if (normalized.Contains('\n'))
-        {
-            return false;
-        }
-
-        var lowered = normalized.ToLowerInvariant();
-        if (NonTrivialKeywords.Any(keyword => lowered.Contains(keyword, StringComparison.Ordinal)))
-        {
-            return false;
-        }
-
-        var wordCount = Regex.Matches(normalized, @"\b\w+\b").Count;
-        if (wordCount > 30)
-        {
-            return false;
-        }
-
-        return normalized.EndsWith("?", StringComparison.Ordinal)
-            || lowered.StartsWith("what is ", StringComparison.Ordinal)
-            || lowered.StartsWith("who is ", StringComparison.Ordinal)
-            || lowered.StartsWith("when is ", StringComparison.Ordinal)
-            || lowered.StartsWith("where is ", StringComparison.Ordinal)
-            || lowered.StartsWith("how many ", StringComparison.Ordinal)
-            || lowered.StartsWith("define ", StringComparison.Ordinal)
-            || lowered.StartsWith("briefly explain ", StringComparison.Ordinal);
-    }
-
-    private static bool IsLikelyToolEvent(object evt)
-    {
-        var eventTypeName = evt.GetType().Name;
-        return eventTypeName.Contains("Tool", StringComparison.OrdinalIgnoreCase)
-            || eventTypeName.Contains("Function", StringComparison.OrdinalIgnoreCase)
-            || eventTypeName.Contains("Mcp", StringComparison.OrdinalIgnoreCase)
-            || eventTypeName.Contains("Command", StringComparison.OrdinalIgnoreCase);
-    }
+    private readonly record struct CliEventParseResult(string Content, bool IsThinking, bool ToolUsed);
 }
 
 public sealed class McpSetupException : Exception

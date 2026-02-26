@@ -80,3 +80,10 @@ If the service already exists and you republish, update path and restart:
 1. Start the OAuth flow at `http://localhost:5260/api/auth/admin/login` in a browser.
 2. After GitHub redirects back, the callback returns JSON with the auth result.
 3. Check connection status at `http://localhost:5260/api/auth/status`.
+
+## Gmail MCP in headless/server mode
+
+- Buddy always runs Copilot CLI with `--allow-all-tools` and `COPILOT_ALLOW_ALL=1`.
+- For non-interactive Slack/server flows, Gmail MCP must already be authorized for the **same Windows user profile** that runs the server process.
+- If you see permission errors like “could not request permission from user”, run a one-time interactive authorization using that same runtime user, then restart Buddy.
+- Startup logs now include runtime identity and configured user MCP config path so you can confirm profile/config alignment quickly.

@@ -219,10 +219,14 @@ Status:
                 cancellationToken,
                 message.Context);
         }
-        catch (InvalidOperationException ex) when (ex.Message.Contains("Policy requires", StringComparison.OrdinalIgnoreCase))
+        catch (InvalidOperationException ex) when (IsMcpPermissionDeniedError(ex))
         {
-            _logger.LogWarning(ex, "Copilot tool-use policy violation for {User}", message.From);
-            await SendMessageAsync(message.From, ex.Message, cancellationToken, message.Context);
+            _logger.LogWarning(ex, "MCP permission denied for user {User}", message.From);
+            await SendMessageAsync(
+                message.From,
+                "⚠️ Gmail MCP is configured but not authorized for this runtime session. This server runs headless, so interactive consent prompts cannot be shown. Ensure the runtime Windows user has completed Gmail MCP authorization and that Copilot CLI is started with auto-approve permissions.",
+                cancellationToken,
+                message.Context);
         }
         catch (Exception ex)
         {
@@ -516,5 +520,19 @@ Status:
             || normalized.Contains("success", StringComparison.Ordinal)
             || normalized.Contains("message id", StringComparison.Ordinal)
             || normalized.Contains("done", StringComparison.Ordinal);
+    }
+
+    private static bool IsMcpPermissionDeniedError(InvalidOperationException exception)
+    {
+        if (exception == null)
+        {
+            return false;
+        }
+
+        var message = exception.Message;
+        return !string.IsNullOrWhiteSpace(message)
+            && (message.Contains("MCP permission denied", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("could not request interactive approval", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("could not request permission from user", StringComparison.OrdinalIgnoreCase));
     }
 }

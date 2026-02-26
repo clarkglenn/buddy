@@ -2,6 +2,7 @@ using Server.Options;
 using Server.Services;
 using Buddy.Server.Services.Messaging;
 using Buddy.Server.Options;
+using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -32,7 +33,14 @@ builder.Services.AddOptions<GitHubOptions>()
 
 builder.Services.AddOptions<CopilotOptions>()
     .BindConfiguration(CopilotOptions.SectionName)
-    .Validate(options => !string.IsNullOrWhiteSpace(options.Model), "Copilot:Model is required.")
+    .Validate(options => !string.IsNullOrWhiteSpace(options.Cli.Command), "Copilot:Cli:Command is required.")
+    .Validate(
+        options => string.IsNullOrWhiteSpace(options.Cli.StreamMode)
+            || options.Cli.StreamMode.Equals("plain-text", StringComparison.OrdinalIgnoreCase)
+            || options.Cli.StreamMode.Equals("json-stream", StringComparison.OrdinalIgnoreCase)
+            || options.Cli.StreamMode.Equals("json", StringComparison.OrdinalIgnoreCase)
+            || options.Cli.StreamMode.Equals("ndjson", StringComparison.OrdinalIgnoreCase),
+        "Copilot:Cli:StreamMode must be one of: plain-text, json-stream, json, ndjson.")
     .ValidateOnStart();
 
 builder.Services.AddOptions<MessagingOptions>()
@@ -72,7 +80,9 @@ builder.Services.AddScoped<CopilotClient>();
 var app = builder.Build();
 
 var startupLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("StartupPreflight");
-StartupPreflight.LogCommandAvailability(startupLogger, "pwsh", "powershell", "node", "npx");
+StartupPreflight.LogCommandAvailability(startupLogger, "copilot", "pwsh", "powershell", "node", "npx");
+var copilotOptions = app.Services.GetRequiredService<IOptions<CopilotOptions>>().Value;
+StartupPreflight.LogRuntimeContext(startupLogger, copilotOptions.McpDiscovery.UserConfigPath);
 
 app.UseCors();
 

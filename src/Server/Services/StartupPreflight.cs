@@ -52,4 +52,28 @@ public static class StartupPreflight
 
         return false;
     }
+
+        public static void LogRuntimeContext(ILogger logger, string? configuredUserConfigPath)
+        {
+            var userName = Environment.UserName;
+            var userDomain = Environment.UserDomainName;
+            var processUserProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+            logger.LogInformation(
+                "Runtime identity: {Domain}\\{User}. UserProfile={UserProfile}. CurrentDirectory={CurrentDirectory}",
+                userDomain,
+                userName,
+                processUserProfile,
+                Environment.CurrentDirectory);
+
+            if (string.IsNullOrWhiteSpace(configuredUserConfigPath))
+            {
+                return;
+            }
+
+            logger.LogInformation(
+                "Configured Copilot user MCP config path: {Path}. Exists={Exists}",
+                configuredUserConfigPath,
+                File.Exists(configuredUserConfigPath));
+        }
 }

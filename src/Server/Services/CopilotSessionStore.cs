@@ -1,8 +1,6 @@
 using System.Text;
-using GitHub.Copilot.SDK;
 using Microsoft.Extensions.Options;
 using Server.Options;
-using CopilotSDKClient = GitHub.Copilot.SDK.CopilotClient;
 
 namespace Server.Services;
 
@@ -137,17 +135,16 @@ public sealed class CopilotSessionStore : ICopilotSessionStore, IAsyncDisposable
 
 public sealed class CopilotSessionEntry : IAsyncDisposable
 {
-    public CopilotSDKClient Client { get; }
-    public dynamic Session { get; }
     public SemaphoreSlim Gate { get; } = new(1, 1);
     public DateTime LastUsedUtc { get; private set; }
     public bool IsFaulted { get; private set; }
     public CopilotRequestState? CurrentRequest { get; set; }
+    public IReadOnlyList<CopilotConversationTurn> ConversationHistory => _conversationHistory;
 
-    public CopilotSessionEntry(CopilotSDKClient client, dynamic session)
+    private readonly List<CopilotConversationTurn> _conversationHistory = [];
+
+    public CopilotSessionEntry()
     {
-        Client = client;
-        Session = session;
         LastUsedUtc = DateTime.UtcNow;
     }
 
@@ -166,26 +163,37 @@ public sealed class CopilotSessionEntry : IAsyncDisposable
         IsFaulted = true;
     }
 
+    public void AddTurn(string userPrompt, string assistantResponse, int maxConversationTurns)
+    {
+        _conversationHistory.Add(new CopilotConversationTurn(userPrompt, assistantResponse));
+
+        var maxTurns = Math.Max(1, maxConversationTurns);
+        var overflow = _conversationHistory.Count - maxTurns;
+        if (overflow <= 0)
+        {
+            return;
+        }
+
+        _conversationHistory.RemoveRange(0, overflow);
+    }
+
     public async ValueTask DisposeAsync()
     {
-        await Session.DisposeAsync();
-        await Client.DisposeAsync();
+        await Task.CompletedTask;
     }
 }
+
+public sealed record CopilotConversationTurn(string UserPrompt, string AssistantResponse);
 
 public sealed class CopilotRequestState
 {
     public StringBuilder Buffer { get; }
     public Func<string, CancellationToken, Task> OnDelta { get; }
-    public TaskCompletionSource<bool> Done { get; }
-    public bool IsTrivialPrompt { get; }
     public bool ToolUsed { get; set; }
 
-    public CopilotRequestState(StringBuilder buffer, Func<string, CancellationToken, Task> onDelta, bool isTrivialPrompt)
+    public CopilotRequestState(StringBuilder buffer, Func<string, CancellationToken, Task> onDelta)
     {
         Buffer = buffer;
         OnDelta = onDelta;
-        IsTrivialPrompt = isTrivialPrompt;
-        Done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 }
