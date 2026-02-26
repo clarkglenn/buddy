@@ -68,6 +68,7 @@ public class SlackProvider : IMessagingProvider
 
             if (parameters.Style == MessageStyle.Thinking)
             {
+                var thinkingText = $":hourglass_flowing_sand: {parameters.Message}";
                 payload["blocks"] = new[]
                 {
                     new Dictionary<string, object>
@@ -78,7 +79,7 @@ public class SlackProvider : IMessagingProvider
                             new Dictionary<string, object>
                             {
                                 ["type"] = "mrkdwn",
-                                ["text"] = $"_{parameters.Message}_"
+                                ["text"] = thinkingText
                             }
                         }
                     }
