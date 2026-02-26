@@ -13,10 +13,6 @@ public class SlackProvider : IMessagingProvider
 {
     public MessagingPlatform Platform => MessagingPlatform.Slack;
 
-    private const string ChannelContextKey = "channel";
-    private const string ThreadContextKey = "thread_ts";
-    private const string UpdateTsContextKey = "update_ts";
-
     private readonly HttpClient _httpClient;
     private readonly IOptions<MessagingOptions> _options;
     private readonly ILogger<SlackProvider> _logger;
@@ -167,7 +163,7 @@ public class SlackProvider : IMessagingProvider
             return null;
         }
 
-        return parameters.Context.TryGetValue(ChannelContextKey, out var channelId)
+        return parameters.Context.TryGetValue(MessagingContextKeys.Channel, out var channelId)
             ? channelId
             : null;
     }
@@ -179,7 +175,7 @@ public class SlackProvider : IMessagingProvider
             return null;
         }
 
-        return parameters.Context.TryGetValue(ThreadContextKey, out var threadTs) && !string.IsNullOrWhiteSpace(threadTs)
+        return parameters.Context.TryGetValue(MessagingContextKeys.ThreadTs, out var threadTs) && !string.IsNullOrWhiteSpace(threadTs)
             ? threadTs
             : null;
     }
@@ -191,7 +187,7 @@ public class SlackProvider : IMessagingProvider
             return null;
         }
 
-        return parameters.Context.TryGetValue(UpdateTsContextKey, out var ts) && !string.IsNullOrWhiteSpace(ts)
+        return parameters.Context.TryGetValue(MessagingContextKeys.UpdateTs, out var ts) && !string.IsNullOrWhiteSpace(ts)
             ? ts
             : null;
     }

@@ -59,6 +59,17 @@ public sealed class MessageHandlerServiceFinalStatusTests
     }
 
     [Fact]
+    public void BuildDefinitiveFinalMessage_keeps_informational_summary_without_failure_suffix()
+    {
+        const string message = "Here are summaries of your last 3 emails from today.";
+
+        var result = InvokePrivateStatic<string>("BuildDefinitiveFinalMessage", message);
+
+        Assert.Equal(message, result);
+        Assert.DoesNotContain("couldn’t confirm", result, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void SanitizeForUserFacingOutput_removes_internal_progress_and_pwsh_diagnostics()
     {
         const string content = "I’ll inspect the repo next.\nThe feature is now enabled.\nSince CLI commands aren’t runnable here because pwsh isn’t available.";

@@ -10,8 +10,7 @@ namespace Buddy.Server.Services.Messaging;
 /// </summary>
 public class MessageHandlerService : IMessageHandlerService
 {
-    private const string ReplyTsContextKey = "reply_ts";
-    private const string UpdateTsContextKey = "update_ts";
+    private const string UnconfirmedCompletionMessage = "❌ I couldn’t confirm this request completed successfully.";
 
     private readonly IMessagingProviderFactory _providerFactory;
     private readonly CopilotClient _copilotClient;
@@ -88,7 +87,7 @@ Status:
             const string thinkingMessage = "Still working…";
             var lastAnswerUpdateAt = (DateTimeOffset?)null;
             var updateThrottle = TimeSpan.FromMilliseconds(900);
-            var replyTs = TryGetContextValue(message.Context, ReplyTsContextKey);
+            var replyTs = TryGetContextValue(message.Context, MessagingContextKeys.ReplyTs);
             var lastRenderedMessage = string.Empty;
 
             // Stream the response
@@ -250,17 +249,9 @@ Status:
             ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             : new Dictionary<string, string>(originalContext, StringComparer.OrdinalIgnoreCase);
 
-        updateContext[UpdateTsContextKey] = replyTs;
+        updateContext[MessagingContextKeys.UpdateTs] = replyTs;
 
         return await SendMessageAsync(user, message, cancellationToken, updateContext, style);
-    }
-
-    private static IEnumerable<string> ChunkMessage(string message, int chunkSize)
-    {
-        for (int i = 0; i < message.Length; i += chunkSize)
-        {
-            yield return message.Substring(i, Math.Min(chunkSize, message.Length - i));
-        }
     }
 
     private static string? TryGetContextValue(Dictionary<string, string>? context, string key)
@@ -447,17 +438,57 @@ Status:
             return trimmed;
         }
 
-        // If the message looks like a successful email send (cat facts/care tips or otherwise), force a clear final message
-        if (LooksLikeDefinitiveSuccess(trimmed) ||
-            (trimmed.Contains("cat", StringComparison.OrdinalIgnoreCase) &&
-             trimmed.Contains("email", StringComparison.OrdinalIgnoreCase) &&
-             (trimmed.Contains("sent", StringComparison.OrdinalIgnoreCase) || trimmed.Contains("overview", StringComparison.OrdinalIgnoreCase) || trimmed.Contains("care", StringComparison.OrdinalIgnoreCase))))
+        if (LooksLikeDefinitiveSuccess(trimmed))
         {
-            // Always return a clear, explicit completion message
-            return "✅ All done. The requested email has been sent and no further action is required.";
+            return trimmed;
         }
 
-        return $"{trimmed}{Environment.NewLine}{Environment.NewLine}❌ I couldn’t confirm this request completed successfully.";
+        if (!LooksLikeActionOrCommitment(trimmed))
+        {
+            return trimmed;
+        }
+
+        return $"{trimmed}{Environment.NewLine}{Environment.NewLine}{UnconfirmedCompletionMessage}";
+    }
+
+    private static bool LooksLikeActionOrCommitment(string message)
+    {
+        var normalized = message.ToLowerInvariant();
+        var lines = message.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (lines.Length == 0)
+        {
+            return false;
+        }
+
+        var firstLine = lines[0].ToLowerInvariant();
+        if (firstLine.StartsWith("i will", StringComparison.Ordinal)
+            || firstLine.StartsWith("i'm going to", StringComparison.Ordinal)
+            || firstLine.StartsWith("i am going to", StringComparison.Ordinal)
+            || firstLine.StartsWith("i'll", StringComparison.Ordinal)
+            || firstLine.StartsWith("working on", StringComparison.Ordinal)
+            || firstLine.StartsWith("attempting", StringComparison.Ordinal)
+            || firstLine.StartsWith("trying", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return normalized.Contains("sending", StringComparison.Ordinal)
+            || normalized.Contains("sent", StringComparison.Ordinal)
+            || normalized.Contains("execute", StringComparison.Ordinal)
+            || normalized.Contains("executed", StringComparison.Ordinal)
+            || normalized.Contains("run ", StringComparison.Ordinal)
+            || normalized.Contains("running", StringComparison.Ordinal)
+            || normalized.Contains("deploy", StringComparison.Ordinal)
+            || normalized.Contains("deployed", StringComparison.Ordinal)
+            || normalized.Contains("created", StringComparison.Ordinal)
+            || normalized.Contains("updated", StringComparison.Ordinal)
+            || normalized.Contains("deleted", StringComparison.Ordinal)
+            || normalized.Contains("changed", StringComparison.Ordinal)
+            || normalized.Contains("applied", StringComparison.Ordinal)
+            || normalized.Contains("committed", StringComparison.Ordinal)
+            || normalized.Contains("opened", StringComparison.Ordinal)
+            || normalized.Contains("posted", StringComparison.Ordinal)
+            || normalized.Contains("submitted", StringComparison.Ordinal);
     }
 
     private static bool LooksLikeDefinitiveFailure(string message)

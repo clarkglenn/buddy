@@ -21,7 +21,6 @@ public class SlackSocketModeService : BackgroundService
     private bool _reconnectRequested;
     private readonly ConcurrentDictionary<string, DateTimeOffset> _recentInboundEventKeys = new(StringComparer.Ordinal);
     private static readonly TimeSpan InboundEventDedupeWindow = TimeSpan.FromMinutes(2);
-    private const string ReplyTsContextKey = "reply_ts";
 
     public SlackSocketModeService(
         IOptions<MessagingOptions> options,
@@ -370,7 +369,7 @@ public class SlackSocketModeService : BackgroundService
                         ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                         : new Dictionary<string, string>(incomingMessage.Context, StringComparer.OrdinalIgnoreCase);
 
-                    context[ReplyTsContextKey] = replyTs!;
+                    context[MessagingContextKeys.ReplyTs] = replyTs!;
                     incomingMessage = incomingMessage with { Context = context };
                 }
 
@@ -432,15 +431,15 @@ public class SlackSocketModeService : BackgroundService
                 ReceivedAt = DateTime.UtcNow,
                 Context = new Dictionary<string, string>
                 {
-                    { "channel", channelId ?? "" },
-                    { "is_slash_command", "true" }
+                    { MessagingContextKeys.Channel, channelId ?? "" },
+                    { MessagingContextKeys.IsSlashCommand, "true" }
                 }
             };
 
             var replyTs = await SendImmediateOnItResponseAsync(incomingMessage, cancellationToken);
             if (!string.IsNullOrWhiteSpace(replyTs))
             {
-                incomingMessage.Context[ReplyTsContextKey] = replyTs!;
+                incomingMessage.Context[MessagingContextKeys.ReplyTs] = replyTs!;
             }
 
             // Process the message without blocking
@@ -495,8 +494,8 @@ public class SlackSocketModeService : BackgroundService
             ReceivedAt = DateTime.UtcNow,
             Context = new Dictionary<string, string>
             {
-                { "channel", channel ?? "" },
-                { "thread_ts", conversationTs ?? "" }
+                { MessagingContextKeys.Channel, channel ?? "" },
+                { MessagingContextKeys.ThreadTs, conversationTs ?? "" }
             }
         };
     }
@@ -537,8 +536,8 @@ public class SlackSocketModeService : BackgroundService
             ReceivedAt = DateTime.UtcNow,
             Context = new Dictionary<string, string>
             {
-                { "channel", channel ?? "" },
-                { "thread_ts", conversationTs ?? "" }
+                { MessagingContextKeys.Channel, channel ?? "" },
+                { MessagingContextKeys.ThreadTs, conversationTs ?? "" }
             }
         };
     }

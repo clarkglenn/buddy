@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using Buddy.Server.Services.Messaging;
 using Microsoft.Extensions.Options;
 using Server.Options;
 
@@ -14,8 +15,6 @@ public sealed class CopilotClient
     private readonly ICopilotSessionStore _sessionStore;
     private readonly IMcpServerResolver _mcpServerResolver;
 
-    private const string ChannelContextKey = "channel";
-    private const string ThreadContextKey = "thread_ts";
     private const string CopilotAllowAllEnvVar = "COPILOT_ALLOW_ALL";
 
     public CopilotClient(
@@ -117,12 +116,12 @@ public sealed class CopilotClient
             return null;
         }
 
-        if (!context.TryGetValue(ChannelContextKey, out var channel) || string.IsNullOrWhiteSpace(channel))
+        if (!context.TryGetValue(MessagingContextKeys.Channel, out var channel) || string.IsNullOrWhiteSpace(channel))
         {
             return null;
         }
 
-        if (context.TryGetValue(ThreadContextKey, out var threadTs) && !string.IsNullOrWhiteSpace(threadTs))
+        if (context.TryGetValue(MessagingContextKeys.ThreadTs, out var threadTs) && !string.IsNullOrWhiteSpace(threadTs))
         {
             return $"slack:{channel}:{threadTs}";
         }
