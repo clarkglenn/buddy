@@ -15,24 +15,17 @@ public sealed class CopilotOptions
 public sealed class CopilotCliOptions
 {
     /// <summary>
-    /// When true, keep one Copilot CLI process alive per conversation key and reuse it for subsequent turns.
+    /// When true, use --resume to maintain CLI session context across turns (one-shot process per request).
     /// </summary>
     public bool ReuseProcessPerSession { get; init; } = true;
 
     /// <summary>
-    /// When true, run warmup Copilot CLI requests during server startup.
+    /// Experimental. When true, keep one Copilot CLI process alive per conversation key
+    /// and send prompts via stdin instead of spawning a new process each time.
+    /// Requires the Copilot CLI to support interactive stdin mode.
+    /// Falls back to one-shot --resume mode on failure.
     /// </summary>
-    public bool WarmupOnStartup { get; init; } = true;
-
-    /// <summary>
-    /// Number of warmup sessions to initialize during startup.
-    /// </summary>
-    public int WarmupSessionCount { get; init; } = 1;
-
-    /// <summary>
-    /// Timeout for each warmup request.
-    /// </summary>
-    public int WarmupTimeoutSeconds { get; init; } = 30;
+    public bool PersistentProcessMode { get; init; } = false;
 
     /// <summary>
     /// Copilot CLI executable name or absolute path.
