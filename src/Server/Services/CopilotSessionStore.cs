@@ -1,5 +1,4 @@
 using System.Text;
-using System.Diagnostics;
 using Microsoft.Extensions.Options;
 using Server.Options;
 
@@ -141,23 +140,7 @@ public sealed class CopilotSessionEntry : IAsyncDisposable
     public bool IsFaulted { get; private set; }
     public CopilotRequestState? CurrentRequest { get; set; }
     public IReadOnlyList<CopilotConversationTurn> ConversationHistory => _conversationHistory;
-    public Process? CliProcess { get; set; }
     public string CliSessionId { get; } = Guid.NewGuid().ToString("D");
-
-    /// <summary>
-    /// Cached reference to CliProcess.StandardInput for writing prompts to a persistent process.
-    /// </summary>
-    public StreamWriter? StdinWriter { get; set; }
-
-    /// <summary>
-    /// Background task that drains stderr from a persistent process to prevent buffer deadlocks.
-    /// </summary>
-    public Task? StderrPumpTask { get; set; }
-
-    /// <summary>
-    /// True when the session is using a persistent (long-lived) CLI process rather than one-shot.
-    /// </summary>
-    public bool IsPersistent { get; set; }
 
     private readonly List<CopilotConversationTurn> _conversationHistory = [];
 
@@ -197,60 +180,8 @@ public sealed class CopilotSessionEntry : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        var stdinWriter = StdinWriter;
-        StdinWriter = null;
-
-        if (stdinWriter != null)
-        {
-            try
-            {
-                await stdinWriter.FlushAsync();
-                stdinWriter.Close();
-            }
-            catch
-            {
-                // Ignore best-effort shutdown errors.
-            }
-        }
-
-        var process = CliProcess;
-        CliProcess = null;
-        IsPersistent = false;
-
-        if (process != null)
-        {
-            try
-            {
-                if (!process.HasExited)
-                {
-                    process.Kill(entireProcessTree: true);
-                    await process.WaitForExitAsync();
-                }
-            }
-            catch
-            {
-                // Ignore best-effort shutdown errors.
-            }
-            finally
-            {
-                process.Dispose();
-            }
-        }
-
-        var stderrPump = StderrPumpTask;
-        StderrPumpTask = null;
-
-        if (stderrPump != null)
-        {
-            try
-            {
-                await stderrPump.WaitAsync(TimeSpan.FromSeconds(5));
-            }
-            catch
-            {
-                // Ignore — stderr pump may have already completed or faulted.
-            }
-        }
+        Gate.Dispose();
+        await Task.CompletedTask;
     }
 }
 

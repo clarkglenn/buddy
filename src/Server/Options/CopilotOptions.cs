@@ -20,14 +20,6 @@ public sealed class CopilotCliOptions
     public bool ReuseProcessPerSession { get; init; } = true;
 
     /// <summary>
-    /// Experimental. When true, keep one Copilot CLI process alive per conversation key
-    /// and send prompts via stdin instead of spawning a new process each time.
-    /// Requires the Copilot CLI to support interactive stdin mode.
-    /// Falls back to one-shot --resume mode on failure.
-    /// </summary>
-    public bool PersistentProcessMode { get; init; } = false;
-
-    /// <summary>
     /// Copilot CLI executable name or absolute path.
     /// </summary>
     public string Command { get; init; } = "copilot";
@@ -52,5 +44,11 @@ public sealed class CopilotCliOptions
     /// Number of conversation turns retained per Slack thread/session.
     /// </summary>
     public int MaxConversationTurns { get; init; } = 12;
+
+    /// <summary>
+    /// AI model to use (e.g. "gpt-5.2", "claude-sonnet-4.6").
+    /// When null or empty, the CLI default model is used.
+    /// </summary>
+    public string? Model { get; init; }
 }
 

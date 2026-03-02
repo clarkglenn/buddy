@@ -15,8 +15,6 @@ public sealed class CopilotClient
     private readonly ILogger<CopilotClient> _logger;
     private readonly ICopilotSessionStore _sessionStore;
 
-    private const string CopilotAllowAllEnvVar = "COPILOT_ALLOW_ALL";
-
     public CopilotClient(
         IOptions<CopilotOptions> options,
         ILogger<CopilotClient> logger,
@@ -197,12 +195,7 @@ User request:
 
         try
         {
-            // When using a persistent process, the CLI retains its own conversation context,
-            // so we only wrap the prompt with formatting — no history prepend needed.
-            // For one-shot or ephemeral sessions, prepend conversation history as before.
-            var enrichedPrompt = (_options.Cli.PersistentProcessMode && persistConversation && entry.IsPersistent)
-                ? BuildPrompt(prompt)
-                : BuildPromptWithHistory(entry, prompt);
+            var enrichedPrompt = BuildPromptWithHistory(entry, prompt);
 
             await ExecuteCliRequestAsync(enrichedPrompt, requestState, cancellationToken, persistConversation ? entry : null);
 
@@ -234,36 +227,6 @@ User request:
         CancellationToken cancellationToken,
         CopilotSessionEntry? entry)
     {
-        if (entry != null && _options.Cli.PersistentProcessMode)
-        {
-            try
-            {
-                await ExecuteCliRequestPersistentAsync(entry, prompt, requestState, cancellationToken);
-                return;
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                // Caller-initiated cancellation — propagate immediately, don't fall back.
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(
-                    ex,
-                    "Persistent process failed; falling back to one-shot with --resume. SessionId={SessionId}",
-                    entry.CliSessionId);
-
-                await DisposePersistentProcessAsync(entry);
-
-                // Reset the request state buffer so the fallback starts clean.
-                requestState.Buffer.Clear();
-                requestState.ToolUsed = false;
-
-                await ExecuteCliRequestWithResumedSessionAsync(entry, prompt, requestState, cancellationToken);
-                return;
-            }
-        }
-
         if (entry != null && _options.Cli.ReuseProcessPerSession)
         {
             await ExecuteCliRequestWithResumedSessionAsync(entry, prompt, requestState, cancellationToken);
@@ -290,245 +253,6 @@ User request:
                 startInfo.ArgumentList.Add("--no-color");
                 startInfo.ArgumentList.Add("--no-alt-screen");
             });
-    }
-
-    private async Task ExecuteCliRequestPersistentAsync(
-        CopilotSessionEntry entry,
-        string prompt,
-        CopilotRequestState requestState,
-        CancellationToken cancellationToken)
-    {
-        if (entry.CliProcess == null || entry.CliProcess.HasExited)
-        {
-            await DisposePersistentProcessAsync(entry);
-            SpawnPersistentProcess(entry);
-        }
-
-        var boundary = $"__BOUNDARY_{Guid.NewGuid():N}__";
-        var stdinWriter = entry.StdinWriter
-            ?? throw new InvalidOperationException("Persistent process stdin writer is null.");
-
-        _logger.LogInformation(
-            "Persistent process: writing prompt. SessionId={SessionId}, Pid={Pid}, PromptChars={PromptChars}, Boundary={Boundary}",
-            entry.CliSessionId,
-            entry.CliProcess!.Id,
-            prompt.Length,
-            boundary);
-
-        // Write the real user prompt followed by a sentinel prompt for boundary detection.
-        await stdinWriter.WriteLineAsync(prompt.AsMemory(), cancellationToken);
-        await stdinWriter.FlushAsync(cancellationToken);
-
-        // Give the CLI a moment to begin processing the real prompt before writing the sentinel.
-        // The sentinel is a second prompt that asks the CLI to echo a known boundary marker.
-        var sentinelPrompt = $"Reply with exactly: {boundary}";
-        await stdinWriter.WriteLineAsync(sentinelPrompt.AsMemory(), cancellationToken);
-        await stdinWriter.FlushAsync(cancellationToken);
-
-        // Read stdout line-by-line until the boundary marker appears.
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        if (_options.Cli.ResponseTimeoutSeconds > 0)
-        {
-            timeoutCts.CancelAfter(TimeSpan.FromSeconds(_options.Cli.ResponseTimeoutSeconds));
-        }
-
-        var reader = entry.CliProcess.StandardOutput;
-        var foundBoundary = false;
-
-        try
-        {
-            while (true)
-            {
-                var line = await reader.ReadLineAsync(timeoutCts.Token);
-                if (line == null)
-                {
-                    // Process exited unexpectedly (stdout closed).
-                    throw new InvalidOperationException(
-                        $"Persistent Copilot CLI process exited unexpectedly. SessionId={entry.CliSessionId}");
-                }
-
-                // Check if this line contains the boundary marker.
-                if (line.Contains(boundary, StringComparison.Ordinal))
-                {
-                    foundBoundary = true;
-                    break;
-                }
-
-                // Check if this is the sentinel question being echoed back — skip it.
-                if (line.Contains(sentinelPrompt, StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                await HandleCliOutputLineAsync(line, requestState, timeoutCts.Token);
-            }
-        }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            _logger.LogWarning(
-                "Persistent process response timed out. SessionId={SessionId}, TimeoutSeconds={TimeoutSeconds}",
-                entry.CliSessionId,
-                _options.Cli.ResponseTimeoutSeconds);
-            throw new TimeoutException(
-                $"Persistent Copilot CLI response timed out after {_options.Cli.ResponseTimeoutSeconds} seconds.");
-        }
-
-        if (!foundBoundary)
-        {
-            throw new InvalidOperationException(
-                $"Persistent Copilot CLI process did not produce boundary marker. SessionId={entry.CliSessionId}");
-        }
-
-        var output = requestState.Buffer.ToString();
-        _logger.LogInformation(
-            "Persistent process: response complete. SessionId={SessionId}, Pid={Pid}, OutputChars={OutputChars}, ToolUsed={ToolUsed}",
-            entry.CliSessionId,
-            entry.CliProcess.Id,
-            output.Length,
-            requestState.ToolUsed);
-    }
-
-    private void SpawnPersistentProcess(CopilotSessionEntry entry)
-    {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = _options.Cli.Command,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-            WorkingDirectory = Environment.CurrentDirectory
-        };
-
-        foreach (var arg in _options.Cli.Arguments)
-        {
-            if (!string.IsNullOrWhiteSpace(arg))
-            {
-                startInfo.ArgumentList.Add(arg);
-            }
-        }
-
-        startInfo.ArgumentList.Add("--allow-all-tools");
-        startInfo.ArgumentList.Add("--silent");
-        startInfo.ArgumentList.Add("--no-color");
-        startInfo.ArgumentList.Add("--no-alt-screen");
-
-        // Note: No --prompt flag. The process stays alive and reads prompts from stdin.
-
-        ApplyCliEnvironment(startInfo);
-
-        var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
-
-        try
-        {
-            if (!process.Start())
-            {
-                process.Dispose();
-                throw new InvalidOperationException("Failed to start persistent Copilot CLI process.");
-            }
-        }
-        catch (Exception ex) when (ex is not InvalidOperationException)
-        {
-            process.Dispose();
-            throw new InvalidOperationException(
-                $"Failed to launch persistent Copilot CLI command '{_options.Cli.Command}'. " +
-                "Ensure Copilot CLI is installed and available on PATH.", ex);
-        }
-
-        entry.CliProcess = process;
-        entry.StdinWriter = process.StandardInput;
-        entry.StdinWriter.AutoFlush = false;
-        entry.IsPersistent = true;
-
-        // Start a background task to drain stderr so it doesn't fill the OS pipe buffer.
-        entry.StderrPumpTask = Task.Run(async () =>
-        {
-            try
-            {
-                while (true)
-                {
-                    var line = await process.StandardError.ReadLineAsync();
-                    if (line == null)
-                    {
-                        break;
-                    }
-
-                    if (!string.IsNullOrWhiteSpace(line))
-                    {
-                        _logger.LogDebug(
-                            "Persistent process stderr: {Line} (SessionId={SessionId}, Pid={Pid})",
-                            TruncateForLog(line, 500),
-                            entry.CliSessionId,
-                            process.Id);
-                    }
-                }
-            }
-            catch
-            {
-                // Process exited or was killed — stop draining.
-            }
-        });
-
-        _logger.LogInformation(
-            "Persistent Copilot CLI process spawned. SessionId={SessionId}, Pid={Pid}, ArgCount={ArgCount}",
-            entry.CliSessionId,
-            process.Id,
-            startInfo.ArgumentList.Count);
-    }
-
-    private async Task DisposePersistentProcessAsync(CopilotSessionEntry entry)
-    {
-        var stdinWriter = entry.StdinWriter;
-        entry.StdinWriter = null;
-
-        if (stdinWriter != null)
-        {
-            try
-            {
-                stdinWriter.Close();
-            }
-            catch
-            {
-                // Ignore.
-            }
-        }
-
-        var process = entry.CliProcess;
-        entry.CliProcess = null;
-        entry.IsPersistent = false;
-
-        if (process != null)
-        {
-            SafeKill(process);
-            try
-            {
-                await process.WaitForExitAsync(new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
-            }
-            catch
-            {
-                // Ignore.
-            }
-
-            process.Dispose();
-        }
-
-        var stderrPump = entry.StderrPumpTask;
-        entry.StderrPumpTask = null;
-
-        if (stderrPump != null)
-        {
-            try
-            {
-                await stderrPump.WaitAsync(TimeSpan.FromSeconds(2));
-            }
-            catch
-            {
-                // Ignore.
-            }
-        }
     }
 
     private async Task ExecuteCliRequestOneShotAsync(
@@ -558,16 +282,24 @@ User request:
             }
         }
 
-        startInfo.ArgumentList.Add("--allow-all-tools");
+        startInfo.ArgumentList.Add("--allow-all");
         startInfo.ArgumentList.Add("--silent");
+        startInfo.ArgumentList.Add("--no-ask-user");
+        startInfo.ArgumentList.Add("--autopilot");
+        startInfo.ArgumentList.Add("--no-alt-screen");
         startInfo.ArgumentList.Add("--prompt");
         startInfo.ArgumentList.Add(prompt);
+
+        if (!string.IsNullOrWhiteSpace(_options.Cli.Model))
+        {
+            startInfo.ArgumentList.Add("--model");
+            startInfo.ArgumentList.Add(_options.Cli.Model);
+        }
+
         configureStartInfo(startInfo);
 
         var requestId = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture)[..8];
         var mode = TryGetResumeSessionId(startInfo, out var resumeSessionId) ? "resume" : "oneshot";
-
-        ApplyCliEnvironment(startInfo);
 
         using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
         var execSw = Stopwatch.StartNew();
@@ -884,16 +616,11 @@ User request:
         return GetString(parent, childName);
     }
 
-    private static void ApplyCliEnvironment(ProcessStartInfo startInfo)
-    {
-        startInfo.Environment[CopilotAllowAllEnvVar] = "1";
-    }
-
     private static string BuildCliFailureMessage(int exitCode, string stderr)
     {
         if (!string.IsNullOrWhiteSpace(stderr) && IsPermissionDeniedError(stderr))
         {
-            return "MCP permission denied. This session could not request interactive approval. Ensure Copilot CLI runs with --allow-all-tools (or COPILOT_ALLOW_ALL=1) and that Gmail MCP is already authorized for the runtime Windows user profile.";
+            return "MCP permission denied. This session could not request interactive approval. Ensure Copilot CLI runs with --allow-all and that Gmail MCP is already authorized for the runtime Windows user profile.";
         }
 
         return string.IsNullOrWhiteSpace(stderr)
