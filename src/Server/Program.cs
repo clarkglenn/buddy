@@ -4,8 +4,12 @@ using Buddy.Server.Services.Messaging;
 using Buddy.Server.Options;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
+using Serilog;
 
 var builder = Host.CreateApplicationBuilder(args);
+
+builder.Services.AddSerilog(config => config
+    .ReadFrom.Configuration(builder.Configuration));
 
 if (builder.Environment.IsDevelopment())
 {

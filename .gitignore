@@ -13,6 +13,9 @@ obj/
 .env
 .env.*
 
+# Serilog log files
+logs/
+
 # Local-only ASP.NET Core development settings (may contain secrets)
 **/appsettings.Development.json
 src/Server/appsettings.Development.json
