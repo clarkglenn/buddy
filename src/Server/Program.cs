@@ -37,7 +37,6 @@ if (messagingConfig?.Slack?.UseSocketMode == true)
 builder.Services.AddHostedService<CopilotWarmupService>();
 
 builder.Services.AddSingleton<ICopilotSessionStore, CopilotSessionStore>();
-builder.Services.AddSingleton<IMcpServerResolver, McpServerResolver>();
 builder.Services.AddScoped<IMessageHandlerService, MessageHandlerService>();
 
 // Register messaging providers
@@ -59,8 +58,7 @@ var app = builder.Build();
 
 var startupLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("StartupPreflight");
 StartupPreflight.LogCommandAvailability(startupLogger, "copilot", "pwsh", "powershell", "node", "npx");
-var copilotOptions = app.Services.GetRequiredService<IOptions<CopilotOptions>>().Value;
-StartupPreflight.LogRuntimeContext(startupLogger, copilotOptions.McpDiscovery.UserConfigPath);
+StartupPreflight.LogRuntimeContext(startupLogger);
 
 await app.RunAsync();
 

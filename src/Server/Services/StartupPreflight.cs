@@ -53,7 +53,7 @@ public static class StartupPreflight
         return false;
     }
 
-        public static void LogRuntimeContext(ILogger logger, string? configuredUserConfigPath)
+        public static void LogRuntimeContext(ILogger logger)
         {
             var userName = Environment.UserName;
             var userDomain = Environment.UserDomainName;
@@ -65,15 +65,5 @@ public static class StartupPreflight
                 userName,
                 processUserProfile,
                 Environment.CurrentDirectory);
-
-            if (string.IsNullOrWhiteSpace(configuredUserConfigPath))
-            {
-                return;
-            }
-
-            logger.LogInformation(
-                "Configured Copilot user MCP config path: {Path}. Exists={Exists}",
-                configuredUserConfigPath,
-                File.Exists(configuredUserConfigPath));
         }
 }

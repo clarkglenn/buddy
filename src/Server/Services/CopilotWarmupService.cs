@@ -43,21 +43,7 @@ public sealed class CopilotWarmupService : IHostedService
 
         using var scope = _scopeFactory.CreateScope();
         var client = scope.ServiceProvider.GetRequiredService<CopilotClient>();
-        var resolver = scope.ServiceProvider.GetRequiredService<IMcpServerResolver>();
         var sessionStore = scope.ServiceProvider.GetRequiredService<ICopilotSessionStore>();
-
-        try
-        {
-            var resolution = resolver.Resolve();
-            _logger.LogInformation(
-                "MCP warmup complete. ServerCount={Count}, ToolCount={ToolCount}",
-                resolution.Servers.Count,
-                resolution.ToolNames.Count);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "MCP warmup failed during startup; runtime requests will retry MCP resolution.");
-        }
 
         for (var i = 0; i < warmupCount; i++)
         {

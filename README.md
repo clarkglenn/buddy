@@ -20,7 +20,6 @@ Required settings:
 Optional settings:
 
 - `Copilot:Cli:ResponseTimeoutSeconds`
-- `Copilot:McpDiscovery:*`
 
 Example (local dev):
 

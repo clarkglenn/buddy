@@ -14,20 +14,17 @@ public sealed class CopilotClient
     private readonly CopilotOptions _options;
     private readonly ILogger<CopilotClient> _logger;
     private readonly ICopilotSessionStore _sessionStore;
-    private readonly IMcpServerResolver _mcpServerResolver;
 
     private const string CopilotAllowAllEnvVar = "COPILOT_ALLOW_ALL";
 
     public CopilotClient(
         IOptions<CopilotOptions> options,
         ILogger<CopilotClient> logger,
-        ICopilotSessionStore sessionStore,
-        IMcpServerResolver mcpServerResolver)
+        ICopilotSessionStore sessionStore)
     {
         _options = options.Value;
         _logger = logger;
         _sessionStore = sessionStore;
-        _mcpServerResolver = mcpServerResolver;
     }
 
     public async Task<string> StreamCopilotResponseAsync(
@@ -612,44 +609,9 @@ User request:
         return GetString(parent, childName);
     }
 
-    private void ApplyCliEnvironment(ProcessStartInfo startInfo)
+    private static void ApplyCliEnvironment(ProcessStartInfo startInfo)
     {
         startInfo.Environment[CopilotAllowAllEnvVar] = "1";
-
-        if (!_options.McpDiscovery.Enabled)
-        {
-            return;
-        }
-
-        var resolution = _mcpServerResolver.Resolve();
-        if (resolution.Servers.Count == 0)
-        {
-            _logger.LogInformation("No MCP servers found for Copilot CLI.");
-            return;
-        }
-
-        var serverNames = resolution.Servers.Keys
-            .OrderBy(static name => name, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-
-        if (string.IsNullOrWhiteSpace(resolution.ConfigDir))
-        {
-            throw new McpSetupException(
-                "MCP tools are temporarily unavailable for this Copilot session.",
-                serverNames,
-                "Resolved MCP servers but merged MCP config directory is unavailable.");
-        }
-
-        if (string.IsNullOrWhiteSpace(_options.Cli.McpConfigDirEnvironmentVariable))
-        {
-            return;
-        }
-
-        startInfo.Environment[_options.Cli.McpConfigDirEnvironmentVariable] = resolution.ConfigDir;
-        _logger.LogInformation(
-            "Loaded {Count} MCP server(s) for Copilot CLI. ConfigDir={ConfigDir}",
-            resolution.Servers.Count,
-            resolution.ConfigDir);
     }
 
     private static string BuildCliFailureMessage(int exitCode, string stderr)
@@ -715,17 +677,4 @@ User request:
     }
 
     private readonly record struct CliEventParseResult(string Content, bool IsThinking, bool ToolUsed);
-}
-
-public sealed class McpSetupException : Exception
-{
-    public IReadOnlyList<string> ServerNames { get; }
-    public string Detail { get; }
-
-    public McpSetupException(string message, IReadOnlyList<string> serverNames, string detail)
-        : base(message)
-    {
-        ServerNames = serverNames;
-        Detail = detail;
-    }
 }

@@ -1,6 +1,4 @@
 using CopilotClient = global::Server.Services.CopilotClient;
-using IMcpServerResolver = global::Server.Services.IMcpServerResolver;
-using McpSetupException = global::Server.Services.McpSetupException;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -15,18 +13,15 @@ public class MessageHandlerService : IMessageHandlerService
 
     private readonly IMessagingProviderFactory _providerFactory;
     private readonly CopilotClient _copilotClient;
-    private readonly IMcpServerResolver _mcpServerResolver;
     private readonly ILogger<MessageHandlerService> _logger;
 
     public MessageHandlerService(
         IMessagingProviderFactory providerFactory,
         CopilotClient copilotClient,
-        IMcpServerResolver mcpServerResolver,
         ILogger<MessageHandlerService> logger)
     {
         _providerFactory = providerFactory;
         _copilotClient = copilotClient;
-        _mcpServerResolver = mcpServerResolver;
         _logger = logger;
     }
 
@@ -65,20 +60,6 @@ Status:
         const string token = "";
         Task thinkingTask = Task.CompletedTask;
         CancellationTokenSource? thinkingCts = null;
-
-        if (LooksLikeEmailRequest(message.Text))
-        {
-            var mcpResolution = _mcpServerResolver.Resolve();
-            if (!HasEmailMcpCapability(mcpResolution.ToolNames))
-            {
-                await SendMessageAsync(
-                    message.From,
-                    "❌ I couldn’t send the email because no email MCP tool is available in this session.",
-                    cancellationToken,
-                    message.Context);
-                return;
-            }
-        }
 
         try
         {
@@ -204,29 +185,6 @@ Status:
                 }
             }
 
-        }
-        catch (McpSetupException ex)
-        {
-            _logger.LogWarning(
-                "MCP setup failed for user {User}. Servers={Servers}. Detail={Detail}",
-                message.From,
-                string.Join(", ", ex.ServerNames),
-                ex.Detail);
-
-            await SendMessageAsync(
-                message.From,
-                "⚠️ MCP tools are unavailable for this session right now. Please try again shortly or ask an admin to check MCP configuration.",
-                cancellationToken,
-                message.Context);
-        }
-        catch (InvalidOperationException ex) when (IsMcpPermissionDeniedError(ex))
-        {
-            _logger.LogWarning(ex, "MCP permission denied for user {User}", message.From);
-            await SendMessageAsync(
-                message.From,
-                "⚠️ Gmail MCP is configured but not authorized for this runtime session. This server runs headless, so interactive consent prompts cannot be shown. Ensure the runtime Windows user has completed Gmail MCP authorization and that Copilot CLI is started with auto-approve permissions.",
-                cancellationToken,
-                message.Context);
         }
         catch (Exception ex)
         {
@@ -523,32 +481,6 @@ Status:
             || normalized.Contains("gmail", StringComparison.Ordinal);
     }
 
-    private static bool HasEmailMcpCapability(IReadOnlyList<string> toolNames)
-    {
-        if (toolNames == null || toolNames.Count == 0)
-        {
-            return false;
-        }
-
-        foreach (var toolName in toolNames)
-        {
-            if (string.IsNullOrWhiteSpace(toolName))
-            {
-                continue;
-            }
-
-            var normalized = toolName.ToLowerInvariant();
-            if (normalized.Contains("gmail", StringComparison.Ordinal)
-                || normalized.Contains("email", StringComparison.Ordinal)
-                || normalized.Contains("mail", StringComparison.Ordinal))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     private static string BuildDefinitiveFinalMessage(string message)
     {
         var sanitizedMessage = SanitizeForUserFacingOutput(message);
@@ -649,19 +581,5 @@ Status:
             || normalized.Contains("success", StringComparison.Ordinal)
             || normalized.Contains("message id", StringComparison.Ordinal)
             || normalized.Contains("done", StringComparison.Ordinal);
-    }
-
-    private static bool IsMcpPermissionDeniedError(InvalidOperationException exception)
-    {
-        if (exception == null)
-        {
-            return false;
-        }
-
-        var message = exception.Message;
-        return !string.IsNullOrWhiteSpace(message)
-            && (message.Contains("MCP permission denied", StringComparison.OrdinalIgnoreCase)
-                || message.Contains("could not request interactive approval", StringComparison.OrdinalIgnoreCase)
-                || message.Contains("could not request permission from user", StringComparison.OrdinalIgnoreCase));
     }
 }
