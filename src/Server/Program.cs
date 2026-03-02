@@ -34,7 +34,6 @@ if (messagingConfig?.Slack?.UseSocketMode == true)
     builder.Services.AddHostedService<SlackSocketModeService>();
 }
 
-builder.Services.AddHostedService<McpAvailabilityAnnouncementService>();
 builder.Services.AddHostedService<CopilotWarmupService>();
 
 builder.Services.AddSingleton<ICopilotSessionStore, CopilotSessionStore>();
