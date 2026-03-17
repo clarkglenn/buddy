@@ -163,7 +163,6 @@ User request:
     {
         var buffer = new StringBuilder();
         var requestState = new CopilotRequestState(buffer, onDelta);
-        entry.CurrentRequest = requestState;
 
         try
         {
@@ -204,7 +203,6 @@ User request:
         }
         finally
         {
-            entry.CurrentRequest = null;
             entry.Touch();
         }
     }

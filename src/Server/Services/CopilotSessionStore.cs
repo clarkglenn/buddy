@@ -138,7 +138,6 @@ public sealed class CopilotSessionEntry : IAsyncDisposable
     public SemaphoreSlim Gate { get; } = new(1, 1);
     public DateTime LastUsedUtc { get; private set; }
     public bool IsFaulted { get; private set; }
-    public CopilotRequestState? CurrentRequest { get; set; }
     public string CliSessionId { get; } = Guid.NewGuid().ToString("D");
     public string? AcpSessionId { get; set; }
     public long AcpGeneration { get; set; }

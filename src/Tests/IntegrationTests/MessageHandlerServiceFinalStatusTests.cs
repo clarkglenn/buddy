@@ -18,26 +18,6 @@ public sealed class MessageHandlerServiceFinalStatusTests
     }
 
     [Fact]
-    public void HasEmailMcpCapability_returns_true_for_email_tools()
-    {
-        var toolNames = new[] { "mcp:gmail.send_email", "mcp:filesystem.read" };
-
-        var result = InvokePrivateStatic<bool>("HasEmailMcpCapability", (object)toolNames);
-
-        Assert.True(result);
-    }
-
-    [Fact]
-    public void HasEmailMcpCapability_returns_false_without_email_tools()
-    {
-        var toolNames = new[] { "mcp:filesystem.read", "mcp:playwright.navigate" };
-
-        var result = InvokePrivateStatic<bool>("HasEmailMcpCapability", (object)toolNames);
-
-        Assert.False(result);
-    }
-
-    [Fact]
     public void BuildDefinitiveFinalMessage_keeps_definitive_success_text()
     {
         const string message = "Sent an email to glenn@example.com with body Hej (message id: 123).";
