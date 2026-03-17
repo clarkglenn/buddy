@@ -12,26 +12,21 @@ public sealed class CopilotClientIntegrationTests
     [Fact]
     public async Task StreamCopilotResponseAsync_returns_content()
     {
-        var token = Environment.GetEnvironmentVariable("COPILOT_TEST_TOKEN");
-
-        if (string.IsNullOrWhiteSpace(token))
-        {
-            return;
-        }
-
         var options = Options.Create(new CopilotOptions());
+        var acpHost = new FakeCopilotAcpHost();
 
         var sessionStore = new CopilotSessionStore(options, NullLogger<CopilotSessionStore>.Instance);
         var client = new CopilotClient(
             options,
             NullLogger<CopilotClient>.Instance,
-            sessionStore);
+            sessionStore,
+            acpHost);
 
         var deltas = new List<string>();
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 
         var result = await client.StreamCopilotResponseAsync(
-            token,
+            string.Empty,
             "Reply with the single word: OK.",
             (chunk, _) =>
             {
@@ -70,36 +65,28 @@ public sealed class CopilotClientIntegrationTests
     }
 
     [Fact]
-    public async Task ResumedSession_MultiTurn_MaintainsContext()
+    public async Task SameThread_reuses_single_acp_session()
     {
-        var token = Environment.GetEnvironmentVariable("COPILOT_TEST_TOKEN");
-        if (string.IsNullOrWhiteSpace(token))
-        {
-            return;
-        }
-
-        var options = Options.Create(new CopilotOptions
-        {
-            Cli = new CopilotCliOptions { ReuseProcessPerSession = true }
-        });
+        var options = Options.Create(new CopilotOptions());
+        var acpHost = new FakeCopilotAcpHost();
 
         var sessionStore = new CopilotSessionStore(options, NullLogger<CopilotSessionStore>.Instance);
         var client = new CopilotClient(
             options,
             NullLogger<CopilotClient>.Instance,
-            sessionStore);
+            sessionStore,
+            acpHost);
 
         var context = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["channel"] = "test-channel",
-            ["thread_ts"] = "resumed-multi-turn"
+            ["thread_ts"] = "thread-1"
         };
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 
-        // First request.
         var result1 = await client.StreamCopilotResponseAsync(
-            token,
+            string.Empty,
             "Reply with the single word: FIRST.",
             (_, _) => Task.CompletedTask,
             cts.Token,
@@ -108,9 +95,8 @@ public sealed class CopilotClientIntegrationTests
 
         Assert.False(string.IsNullOrWhiteSpace(result1));
 
-        // Second request — uses --resume to maintain session context.
         var result2 = await client.StreamCopilotResponseAsync(
-            token,
+            string.Empty,
             "Reply with the single word: SECOND.",
             (_, _) => Task.CompletedTask,
             cts.Token,
@@ -118,8 +104,80 @@ public sealed class CopilotClientIntegrationTests
             conversationUserKey: "test-user");
 
         Assert.False(string.IsNullOrWhiteSpace(result2));
+        Assert.Equal(1, acpHost.CreateSessionCount);
+        Assert.Equal(2, acpHost.PromptCount);
+    }
 
-        // Clean up.
-        await sessionStore.RemoveAsync("slack:test-channel:resumed-multi-turn", CancellationToken.None);
+    [Fact]
+    public async Task NewGeneration_creates_new_acp_session()
+    {
+        var options = Options.Create(new CopilotOptions());
+        var acpHost = new FakeCopilotAcpHost();
+        var sessionStore = new CopilotSessionStore(options, NullLogger<CopilotSessionStore>.Instance);
+        var client = new CopilotClient(
+            options,
+            NullLogger<CopilotClient>.Instance,
+            sessionStore,
+            acpHost);
+
+        var context = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["channel"] = "test-channel",
+            ["thread_ts"] = "thread-2"
+        };
+
+        await client.StreamCopilotResponseAsync(
+            string.Empty,
+            "First prompt",
+            (_, _) => Task.CompletedTask,
+            CancellationToken.None,
+            context,
+            "test-user");
+
+        acpHost.AdvanceGeneration();
+
+        await client.StreamCopilotResponseAsync(
+            string.Empty,
+            "Second prompt",
+            (_, _) => Task.CompletedTask,
+            CancellationToken.None,
+            context,
+            "test-user");
+
+        Assert.Equal(2, acpHost.CreateSessionCount);
+    }
+
+    private sealed class FakeCopilotAcpHost : ICopilotAcpHost
+    {
+        private int _sessionCounter;
+
+        public long Generation { get; private set; } = 1;
+
+        public int CreateSessionCount { get; private set; }
+
+        public int PromptCount { get; private set; }
+
+        public Task<string> CreateSessionAsync(string workingDirectory, CancellationToken cancellationToken)
+        {
+            CreateSessionCount++;
+            _sessionCounter++;
+            return Task.FromResult($"session-{_sessionCounter}");
+        }
+
+        public async Task<CopilotAcpPromptResult> PromptSessionAsync(
+            string sessionId,
+            string prompt,
+            Func<CopilotAcpUpdate, CancellationToken, Task> onUpdate,
+            CancellationToken cancellationToken)
+        {
+            PromptCount++;
+            await onUpdate(new CopilotAcpUpdate($"response-from-{sessionId}", false, false), cancellationToken);
+            return new CopilotAcpPromptResult("end_turn");
+        }
+
+        public void AdvanceGeneration()
+        {
+            Generation++;
+        }
     }
 }

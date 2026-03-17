@@ -38,6 +38,8 @@ if (messagingConfig?.Slack?.UseSocketMode == true)
     builder.Services.AddHostedService<SlackSocketModeService>();
 }
 
+builder.Services.AddSingleton<ICopilotAcpHost, CopilotAcpHost>();
+builder.Services.AddHostedService(sp => (CopilotAcpHost)sp.GetRequiredService<ICopilotAcpHost>());
 builder.Services.AddSingleton<ICopilotSessionStore, CopilotSessionStore>();
 builder.Services.AddScoped<IMessageHandlerService, MessageHandlerService>();
 

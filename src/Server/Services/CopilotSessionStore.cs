@@ -141,6 +141,8 @@ public sealed class CopilotSessionEntry : IAsyncDisposable
     public CopilotRequestState? CurrentRequest { get; set; }
     public IReadOnlyList<CopilotConversationTurn> ConversationHistory => _conversationHistory;
     public string CliSessionId { get; } = Guid.NewGuid().ToString("D");
+    public string? AcpSessionId { get; set; }
+    public long AcpGeneration { get; set; }
 
     private readonly List<CopilotConversationTurn> _conversationHistory = [];
 
@@ -162,6 +164,8 @@ public sealed class CopilotSessionEntry : IAsyncDisposable
     public void MarkFaulted()
     {
         IsFaulted = true;
+        AcpSessionId = null;
+        AcpGeneration = 0;
     }
 
     public void AddTurn(string userPrompt, string assistantResponse, int maxConversationTurns)

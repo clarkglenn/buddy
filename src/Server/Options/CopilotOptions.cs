@@ -15,6 +15,11 @@ public sealed class CopilotOptions
 public sealed class CopilotCliOptions
 {
     /// <summary>
+    /// Maximum time to wait for ACP initialization.
+    /// </summary>
+    public int AcpStartupTimeoutSeconds { get; init; } = 30;
+
+    /// <summary>
     /// When true, use --resume to maintain CLI session context across turns (one-shot process per request).
     /// </summary>
     public bool ReuseProcessPerSession { get; init; } = true;
