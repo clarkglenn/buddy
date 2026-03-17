@@ -53,7 +53,7 @@ public sealed class CopilotClient
                 "Copilot request started. SessionId={SessionId}, Mode=ephemeral, Transport=acp",
                 ephemeralEntry.CliSessionId);
 
-            return await StreamWithSessionAsync(ephemeralEntry, prompt, onDelta, cancellationToken, persistConversation: false);
+            return await StreamWithSessionAsync(ephemeralEntry, prompt, onDelta, cancellationToken);
         }
 
         var entry = await _sessionStore.GetOrCreateAsync(
@@ -78,7 +78,7 @@ public sealed class CopilotClient
         var requestSw = Stopwatch.StartNew();
         try
         {
-            var response = await StreamWithSessionAsync(entry, prompt, onDelta, cancellationToken, persistConversation: true);
+            var response = await StreamWithSessionAsync(entry, prompt, onDelta, cancellationToken);
 
             requestSw.Stop();
             _logger.LogInformation(
@@ -130,11 +130,6 @@ User request:
 """;
     }
 
-    private string BuildPromptWithHistory(CopilotSessionEntry entry, string prompt)
-    {
-        return BuildPrompt(prompt);
-    }
-
     private string? BuildConversationKey(Dictionary<string, string>? context, string? conversationUserKey)
     {
         if (context == null)
@@ -164,8 +159,7 @@ User request:
         CopilotSessionEntry entry,
         string prompt,
         Func<string, CancellationToken, Task> onDelta,
-        CancellationToken cancellationToken,
-        bool persistConversation)
+        CancellationToken cancellationToken)
     {
         var buffer = new StringBuilder();
         var requestState = new CopilotRequestState(buffer, onDelta);
@@ -173,7 +167,7 @@ User request:
 
         try
         {
-            var enrichedPrompt = BuildPromptWithHistory(entry, prompt);
+            var enrichedPrompt = BuildPrompt(prompt);
 
             using var promptCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             if (_options.Cli.ResponseTimeoutSeconds > 0)
@@ -196,14 +190,7 @@ User request:
                     acpSessionId);
             }
 
-            var response = buffer.ToString();
-
-            if (persistConversation && !string.IsNullOrWhiteSpace(response))
-            {
-                entry.AddTurn(prompt, response, _options.Cli.MaxConversationTurns);
-            }
-
-            return response;
+            return buffer.ToString();
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {

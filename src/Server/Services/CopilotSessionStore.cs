@@ -139,12 +139,9 @@ public sealed class CopilotSessionEntry : IAsyncDisposable
     public DateTime LastUsedUtc { get; private set; }
     public bool IsFaulted { get; private set; }
     public CopilotRequestState? CurrentRequest { get; set; }
-    public IReadOnlyList<CopilotConversationTurn> ConversationHistory => _conversationHistory;
     public string CliSessionId { get; } = Guid.NewGuid().ToString("D");
     public string? AcpSessionId { get; set; }
     public long AcpGeneration { get; set; }
-
-    private readonly List<CopilotConversationTurn> _conversationHistory = [];
 
     public CopilotSessionEntry()
     {
@@ -168,28 +165,12 @@ public sealed class CopilotSessionEntry : IAsyncDisposable
         AcpGeneration = 0;
     }
 
-    public void AddTurn(string userPrompt, string assistantResponse, int maxConversationTurns)
-    {
-        _conversationHistory.Add(new CopilotConversationTurn(userPrompt, assistantResponse));
-
-        var maxTurns = Math.Max(1, maxConversationTurns);
-        var overflow = _conversationHistory.Count - maxTurns;
-        if (overflow <= 0)
-        {
-            return;
-        }
-
-        _conversationHistory.RemoveRange(0, overflow);
-    }
-
     public async ValueTask DisposeAsync()
     {
         Gate.Dispose();
         await Task.CompletedTask;
     }
 }
-
-public sealed record CopilotConversationTurn(string UserPrompt, string AssistantResponse);
 
 public sealed class CopilotRequestState
 {

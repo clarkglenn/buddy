@@ -19,13 +19,6 @@ if (builder.Environment.IsDevelopment())
 builder.Services.AddOptions<CopilotOptions>()
     .BindConfiguration(CopilotOptions.SectionName)
     .Validate(options => !string.IsNullOrWhiteSpace(options.Cli.Command), "Copilot:Cli:Command is required.")
-    .Validate(
-        options => string.IsNullOrWhiteSpace(options.Cli.StreamMode)
-            || options.Cli.StreamMode.Equals("plain-text", StringComparison.OrdinalIgnoreCase)
-            || options.Cli.StreamMode.Equals("json-stream", StringComparison.OrdinalIgnoreCase)
-            || options.Cli.StreamMode.Equals("json", StringComparison.OrdinalIgnoreCase)
-            || options.Cli.StreamMode.Equals("ndjson", StringComparison.OrdinalIgnoreCase),
-        "Copilot:Cli:StreamMode must be one of: plain-text, json-stream, json, ndjson.")
     .ValidateOnStart();
 
 builder.Services.AddOptions<MessagingOptions>()
